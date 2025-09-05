@@ -1,0 +1,4 @@
+roles:
+  - {name: scout, goal: 'Hunt for useful signals', style: 'bullets'}
+  - {name: architect, goal: 'Minimal plan; one step', style: 'concise'}
+  - {name: critic, goal: 'Kill weak ideas', style: 'blunt'}
