@@ -13,13 +13,13 @@ setenv VIRTUAL_ENV /Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac3
 
 set _OLD_VIRTUAL_PATH="$PATH"
 setenv PATH "$VIRTUAL_ENV/"bin":$PATH"
+setenv VIRTUAL_ENV_PROMPT .venv
 
 
 set _OLD_VIRTUAL_PROMPT="$prompt"
 
 if (! "$?VIRTUAL_ENV_DISABLE_PROMPT") then
-    set prompt = '(.venv) '"$prompt"
-    setenv VIRTUAL_ENV_PROMPT '(.venv) '
+    set prompt = "(".venv") $prompt:q"
 endif
 
 alias pydoc python -m pydoc

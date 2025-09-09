@@ -1,0 +1,30 @@
+{
+  "name": "symbiont-vscode",
+  "displayName": "Symbiont",
+  "description": "Propose a tiny refactor from VS Code.",
+  "version": "0.0.1",
+  "engines": { "vscode": "^1.80.0" },
+  "activationEvents": ["onCommand:symbiont.proposeTinyRefactor"],
+  "main": "out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "symbiont.proposeTinyRefactor",
+        "title": "Symbiont: Propose Tiny Refactor"
+      },
+      {
+        "command": "symbiont.runLatestScriptSafely",
+        "title": "Symbiont: Run Latest Script Safely"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --platform=node --format=cjs",
+    "build": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --platform=node --format=cjs",
+    "watch": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --platform=node --format=cjs --watch"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "esbuild": "^0.21.5"
+  }
+}

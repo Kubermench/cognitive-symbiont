@@ -38,3 +38,16 @@ class MemoryDB:
             (episode_id, description, status, assignee_role)
         )
 
+    def add_intent(self, episode_id: int, summary: str):
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO intents (episode_id, summary, created_at, updated_at) VALUES (?, ?, strftime('%s','now'), strftime('%s','now'))",
+                (episode_id, summary),
+            )
+
+    def latest_intent(self):
+        with self._conn() as c:
+            row = c.execute("SELECT episode_id, summary, updated_at FROM intents ORDER BY id DESC LIMIT 1").fetchone()
+        if not row:
+            return None
+        return {"episode_id": row[0], "summary": row[1], "updated_at": row[2]}

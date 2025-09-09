@@ -4,8 +4,10 @@ from typing import List, Dict, Any
 from rich import print as rprint
 from .memory.db import MemoryDB
 from .memory import retrieval
+from .memory import graphrag
 from .agents.subself import SubSelf
 from .tools.files import ensure_dirs
+from .memory import beliefs as belief_api
 from .tools import scriptify
 
 class Orchestrator:
@@ -32,9 +34,12 @@ class Orchestrator:
         plan = self._write_plan_artifact(eid, goal, decision["action"], trace)
         bullets = next((o["output"].get("bullets", []) for o in trace if o["role"]=="architect"), [])
         if bullets:
-            spath = scriptify.write_script(bullets, base_dir=os.path.join(os.path.dirname(self.config['db_path']), 'artifacts','scripts'))
+            scripts_dir = os.path.join(os.path.dirname(self.config['db_path']), 'artifacts','scripts')
+            spath = scriptify.write_script(bullets, base_dir=scripts_dir)
+            rpath = scriptify.write_rollback_script(spath)
             with self.db._conn() as c:
                 c.execute("INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))", (None,'script',spath,'Script from bullets'))
+                c.execute("INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))", (None,'script',rpath,'Rollback script'))
         rprint("[bold green]Consensus Action:[/bold green]", decision["action"], "\n[dim]Saved:", plan)
         return {"episode_id": eid, "decision": decision, "trace": trace}
 
@@ -53,8 +58,48 @@ class Orchestrator:
         os.makedirs(arts_dir, exist_ok=True)
         fpath = os.path.join(arts_dir, f"plan_{eid}_{int(time.time())}.md")
         blines = "\n".join([f"- {b}" for b in bullets]) if bullets else "- (no concrete bullets)"
+        # beliefs/assumptions
+        try:
+            btop = belief_api.list_beliefs(self.db)[:3]
+        except Exception:
+            btop = []
+        btext = "\n".join([f"- {b['statement']} (conf {b['confidence']:.2f})" for b in btop]) if btop else "- (none)"
+        # sources (recent notes within 24h)
+        notes = []
+        try:
+            with self.db._conn() as c:
+                now = int(time.time())
+                rows = c.execute(
+                    "SELECT path, summary, created_at FROM artifacts WHERE type='note' AND created_at>=? ORDER BY id DESC LIMIT 3",
+                    (now - 86400,),
+                ).fetchall()
+            for (p, s, ts) in rows:
+                try:
+                    first = open(p, 'r', encoding='utf-8').read().splitlines()[0]
+                except Exception:
+                    first = os.path.basename(p)
+                notes.append(f"- {first} — {p}")
+        except Exception:
+            pass
+        sources_text = "\n".join(notes) if notes else "- (none)"
+        # relevant claims (GraphRAG-lite)
+        try:
+            claims = graphrag.query_claims(self.db, goal, limit=3)
+            claims_text = "\n".join([f"- {c['subject']} {c['relation']} {c['object']} (imp {c['importance']:.2f})" for c in claims]) if claims else "- (none)"
+        except Exception:
+            claims_text = "- (none)"
         with open(fpath,"w",encoding="utf-8") as f:
-            f.write(f"# One-Step Plan\nGoal: {goal}\n\n**Action**: {decision}\n\n## 3 bullets\n{blines}\n")
+            f.write(
+                (
+                    f"# One-Step Plan\n"
+                    f"Goal: {goal}\n\n"
+                    f"**Action**: {decision}\n\n"
+                    f"## 3 bullets\n{blines}\n\n"
+                    f"## Assumptions (beliefs)\n{btext}\n"
+                    f"\n## Sources (recent notes)\n{sources_text}\n"
+                    f"\n## Relevant Claims\n{claims_text}\n"
+                )
+            )
         with self.db._conn() as c:
             c.execute("INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))", (None,'plan',fpath,f"Plan for: {goal}"))
         return fpath
