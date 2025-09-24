@@ -25,6 +25,14 @@ This bundle includes RAG memory, a local-first LLM adapter, a Streamlit homebase
 - Browser fetch (guarded): `python -m symbiont.cli browse_fetch "https://docs.astral.sh/ruff/"`
 - MCP server: `python -m symbiont.ports.mcp_server --host 127.0.0.1 --port 8765`
 
+## Autopilot (optional, local)
+
+- Local script: `scripts/autopilot.sh` proposes → applies latest script (guarded `--yes`) → runs Sandbox CI if present → commits to `symbiont/autopilot`.
+- Cron example (Mon–Fri, every 30 min):
+  - `crontab -e`
+  - `*/30 9-18 * * 1-5 cd /path/to/repo && . .venv/bin/activate && ./scripts/autopilot.sh >> data/artifacts/logs/autopilot.log 2>&1`
+- GitHub Actions (auto‑PR): `.github/workflows/symbiont_autopilot.yml` creates a nightly PR with changes. Production still manual.
+
 ## How to See It Working (Detailed)
 
 1) Install

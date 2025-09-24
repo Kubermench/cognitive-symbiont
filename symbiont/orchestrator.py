@@ -35,7 +35,7 @@ class Orchestrator:
         bullets = next((o["output"].get("bullets", []) for o in trace if o["role"]=="architect"), [])
         if bullets:
             scripts_dir = os.path.join(os.path.dirname(self.config['db_path']), 'artifacts','scripts')
-            spath = scriptify.write_script(bullets, base_dir=scripts_dir)
+            spath = scriptify.write_script(bullets, base_dir=scripts_dir, db_path=self.config['db_path'], episode_id=eid)
             rpath = scriptify.write_rollback_script(spath)
             with self.db._conn() as c:
                 c.execute("INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))", (None,'script',spath,'Script from bullets'))
@@ -64,16 +64,25 @@ class Orchestrator:
         except Exception:
             btop = []
         btext = "\n".join([f"- {b['statement']} (conf {b['confidence']:.2f})" for b in btop]) if btop else "- (none)"
-        # sources (recent notes within 24h)
+        # sources: capture recent notes and link them to this episode so we can attribute usage
         notes = []
         try:
             with self.db._conn() as c:
                 now = int(time.time())
                 rows = c.execute(
-                    "SELECT path, summary, created_at FROM artifacts WHERE type='note' AND created_at>=? ORDER BY id DESC LIMIT 3",
+                    "SELECT id, path, summary FROM artifacts WHERE type='note' AND created_at>=? ORDER BY id DESC LIMIT 5",
                     (now - 86400,),
                 ).fetchall()
-            for (p, s, ts) in rows:
+                # Link to episode
+                for (aid, p, s) in rows:
+                    c.execute("INSERT INTO episode_artifacts (episode_id, artifact_id, linked_at) VALUES (?,?,strftime('%s','now'))", (eid, aid))
+            # Build display list from linked notes
+            with self.db._conn() as c:
+                rows2 = c.execute(
+                    "SELECT a.path FROM episode_artifacts ea JOIN artifacts a ON ea.artifact_id=a.id WHERE ea.episode_id=? ORDER BY ea.linked_at DESC LIMIT 5",
+                    (eid,),
+                ).fetchall()
+            for (p,) in rows2:
                 try:
                     first = open(p, 'r', encoding='utf-8').read().splitlines()[0]
                 except Exception:
@@ -96,7 +105,7 @@ class Orchestrator:
                     f"**Action**: {decision}\n\n"
                     f"## 3 bullets\n{blines}\n\n"
                     f"## Assumptions (beliefs)\n{btext}\n"
-                    f"\n## Sources (recent notes)\n{sources_text}\n"
+                    f"\n## Sources (this cycle)\n{sources_text}\n"
                     f"\n## Relevant Claims\n{claims_text}\n"
                 )
             )

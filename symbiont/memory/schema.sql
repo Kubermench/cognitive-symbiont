@@ -19,3 +19,9 @@ CREATE TABLE IF NOT EXISTS claims (
   created_at INTEGER DEFAULT (strftime('%s','now')),
   updated_at INTEGER DEFAULT (strftime('%s','now'))
 );
+-- Link artifacts (e.g., notes) to episodes for "Sources used this cycle"
+CREATE TABLE IF NOT EXISTS episode_artifacts (
+  episode_id INTEGER,
+  artifact_id INTEGER,
+  linked_at INTEGER DEFAULT (strftime('%s','now'))
+);

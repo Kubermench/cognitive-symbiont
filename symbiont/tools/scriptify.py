@@ -1,13 +1,34 @@
 from __future__ import annotations
 import os, re, time, sqlite3
-from typing import List
+from typing import List, Optional
 
-def _extract_cmds(bullets):
-    cmds = []
-    for b in bullets:
-        m = re.search(r"\(cmd:\s*(.+?)\s*\)$", b)
+def _strip_fences(cmd: str) -> str:
+    s = cmd.strip()
+    # Remove inline backticks or fenced code blocks if present
+    if s.startswith("```") and s.endswith("```"):
+        s = s.strip("`")
+        # After removing fences, there might be a language tag on first line
+        parts = s.splitlines()
+        if parts:
+            # drop possible language tag line
+            s = "\n".join(parts[1:])
+    if s.startswith("`") and s.endswith("`"):
+        s = s[1:-1]
+    return s
+
+
+def _extract_cmds(bullets: List[str]) -> List[str]:
+    cmds: List[str] = []
+    # Prefer greedy, end-anchored match to avoid early stop on ')' inside content
+    anchored = re.compile(r"\(cmd:\s*(.*)\s*\)\s*$", re.DOTALL)
+    fallback = re.compile(r"\(cmd:\s*(.+?)\s*\)", re.DOTALL)
+    for b in bullets or []:
+        m = anchored.search(b)
         if m:
-            cmds.append(m.group(1))
+            cmds.append(_strip_fences(m.group(1)))
+            continue
+        for m in fallback.finditer(b):
+            cmds.append(_strip_fences(m.group(1)))
     return cmds
 
 
@@ -31,7 +52,7 @@ def _recent_note_sources(db_path: str, within_seconds: int = 86400, limit: int =
         return []
 
 
-def write_script(bullets, base_dir: str) -> str:
+def write_script(bullets, base_dir: str, db_path: Optional[str] = None, episode_id: Optional[int] = None) -> str:
     os.makedirs(base_dir, exist_ok=True)
     path = os.path.join(base_dir, f"apply_{int(time.time())}.sh")
     cmds = _extract_cmds(bullets)
@@ -45,8 +66,25 @@ def write_script(bullets, base_dir: str) -> str:
         "",
     ]
     # annotate sources from recent notes
-    db_path = os.path.join(os.path.dirname(os.path.dirname(base_dir)), 'symbiont.db')
-    sources = _recent_note_sources(db_path)
+    if episode_id is not None and db_path:
+        sources = []
+        try:
+            with sqlite3.connect(db_path) as c:
+                rows = c.execute(
+                    "SELECT a.path FROM episode_artifacts ea JOIN artifacts a ON ea.artifact_id=a.id WHERE ea.episode_id=? ORDER BY ea.linked_at DESC LIMIT 5",
+                    (episode_id,),
+                ).fetchall()
+            for (p,) in rows:
+                try:
+                    first = open(p, 'r', encoding='utf-8').read().splitlines()[0]
+                except Exception:
+                    first = os.path.basename(p)
+                sources.append(f"#   {first} — {p}")
+        except Exception:
+            sources = []
+    else:
+        db_fallback = os.path.join(os.path.dirname(os.path.dirname(base_dir)), 'symbiont.db')
+        sources = _recent_note_sources(db_fallback)
     trailer = ["", "# Sources (recent notes):"] + (sources or ["#   (none)"])
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(header + body + trailer + ["\n"]))
