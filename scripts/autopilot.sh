@@ -33,8 +33,16 @@ if command -v git >/dev/null 2>&1; then
     echo "[autopilot] committing changes to branch symbiont/autopilot"
     git checkout -B symbiont/autopilot || true
     git add -A || true
+    # Avoid committing local virtualenv if tracked
+    git restore --staged .venv 2>/dev/null || true
+    git rm -r --cached .venv 2>/dev/null || true
     git commit -m "symbiont: autopilot cycle $(date -u +%F)" || true
-    git push -u origin symbiont/autopilot || true
+    if [ "${SYMBIONT_AUTOPILOT_PUSH:-0}" = "1" ]; then
+      echo "[autopilot] pushing to origin (SYMBIONT_AUTOPILOT_PUSH=1)"
+      git push -u origin symbiont/autopilot || true
+    else
+      echo "[autopilot] push disabled (set SYMBIONT_AUTOPILOT_PUSH=1 to enable)"
+    fi
   else
     echo "[autopilot] no changes to commit"
   fi

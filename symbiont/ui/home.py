@@ -34,7 +34,7 @@ def render_home(cfg: dict, db: MemoryDB):
     st.title("🧠 Cognitive Symbiont — Homebase (v2.4)")
 
     tab_dash, tab_art, tab_ep, tab_settings, tab_sandbox = st.tabs(
-        ["Dashboard", "Artifacts", "Episodes/Tasks", "Settings", "Sandbox"]
+        ["Dashboard", "Outputs & Scripts", "Episodes & Tasks", "Settings", "Sandbox"]
     )
 
     with tab_dash:
@@ -136,7 +136,7 @@ def render_home(cfg: dict, db: MemoryDB):
                                 )
                             st.success(f"Script saved at: {path}")
 
-        st.subheader("Latest Artifacts")
+        st.subheader("Latest Outputs")
         lp, lps, lpt = _latest_artifact(cfg["db_path"], "plan")
         ls, lss, lst = _latest_artifact(cfg["db_path"], "script")
         c1, c2 = st.columns(2)
@@ -180,25 +180,25 @@ def render_home(cfg: dict, db: MemoryDB):
                             st.success(
                                 f"Executed with code {proc.returncode}. Log: {log_path}"
                             )
-                        with sqlite3.connect(cfg["db_path"]) as c:
-                            c.execute(
-                                "INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))",
-                                (
-                                    None,
-                                    "log",
-                                    log_path,
-                                    f"Execution log for {os.path.basename(ls)}",
-                                ),
-                            )
-                            c.execute(
-                                "INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)",
-                                (
-                                    "proc_run",
-                                    f"Run script {os.path.basename(ls)}",
-                                    "\n".join(content.splitlines()[:20]),
-                                    1,
-                                ),
-                            )
+                            with sqlite3.connect(cfg["db_path"]) as c:
+                                c.execute(
+                                    "INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))",
+                                    (
+                                        None,
+                                        "log",
+                                        log_path,
+                                        f"Execution log for {os.path.basename(ls)}",
+                                    ),
+                                )
+                                c.execute(
+                                    "INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)",
+                                    (
+                                        "proc_run",
+                                        f"Run script {os.path.basename(ls)}",
+                                        "\n".join(content.splitlines()[:20]),
+                                        1,
+                                    ),
+                                )
                             st.session_state["pending_run_script"] = None
                     with cols[1]:
                         if st.button("Cancel", key="dash_cancel_exec"):
@@ -210,37 +210,54 @@ def render_home(cfg: dict, db: MemoryDB):
                             st.session_state["pending_run_script"] = None
             else:
                 st.info("No script yet. Use Scriptify or run a cycle.")
-            # Revert latest rollback
-            try:
-                with sqlite3.connect(cfg["db_path"]) as c:
-                    r = c.execute("SELECT path FROM artifacts WHERE type='script' AND path LIKE '%rollback_%' ORDER BY id DESC LIMIT 1").fetchone()
-                rb = r[0] if r else None
-            except Exception:
-                rb = None
-            if rb and st.button("Revert Latest (rollback)", key="dash_revert"):
-                st.session_state['pending_rollback'] = rb
-            if rb and st.session_state.get('pending_rollback') == rb:
-                st.warning(f"Confirm rollback script: {rb}")
-                c1,c2 = st.columns(2)
-                with c1:
-                    if st.button("Confirm Rollback Now", key="dash_revert_confirm"):
-                        import subprocess
-                        proc = subprocess.run(["bash", rb], capture_output=True, text=True)
-                        st.success(f"Rollback exit code {proc.returncode}")
-                        with sqlite3.connect(cfg["db_path"]) as c:
-                            c.execute(
-                                "INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)",
-                                ("proc_run", f"Rollback {os.path.basename(rb)}", "", 1),
-                            )
-                        st.session_state['pending_rollback'] = None
-                with c2:
-                    if st.button("Cancel", key="dash_revert_cancel"):
-                        with sqlite3.connect(cfg["db_path"]) as c:
-                            c.execute(
-                                "INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)",
-                                ("proc_run", f"Rollback {os.path.basename(rb)}", "cancel", 0),
-                            )
-                        st.session_state['pending_rollback'] = None
+
+        st.subheader("Guard Console (last 10 decisions)")
+        try:
+            with sqlite3.connect(cfg["db_path"]) as c:
+                rows = c.execute(
+                    "SELECT capability, description, preview, approved, created_at FROM audits ORDER BY id DESC LIMIT 10"
+                ).fetchall()
+            view = []
+            for cap, desc, prev, approved, ts in rows:
+                status = "✅ allowed" if int(approved or 0) == 1 else "⛔ denied"
+                when = _rel(ts)
+                cap_name = {"fs_write":"Write files","proc_run":"Run commands","net_read":"Read from web"}.get(cap, cap)
+                view.append({"capability": cap_name, "action": (desc or "")[:80], "details": (prev or "")[:60], "status": status, "when": when})
+            st.dataframe(view, use_container_width=True)
+        except Exception as e:
+            st.error(str(e))
+
+        # Revert latest rollback
+        try:
+            with sqlite3.connect(cfg["db_path"]) as c:
+                r = c.execute("SELECT path FROM artifacts WHERE type='script' AND path LIKE '%rollback_%' ORDER BY id DESC LIMIT 1").fetchone()
+            rb = r[0] if r else None
+        except Exception:
+            rb = None
+        if rb and st.button("Revert Latest (rollback)", key="dash_revert"):
+            st.session_state['pending_rollback'] = rb
+        if rb and st.session_state.get('pending_rollback') == rb:
+            st.warning(f"Confirm rollback script: {rb}")
+            c1,c2 = st.columns(2)
+            with c1:
+                if st.button("Confirm Rollback Now", key="dash_revert_confirm"):
+                    import subprocess
+                    proc = subprocess.run(["bash", rb], capture_output=True, text=True)
+                    st.success(f"Rollback exit code {proc.returncode}")
+                    with sqlite3.connect(cfg["db_path"]) as c:
+                        c.execute(
+                            "INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)",
+                            ("proc_run", f"Rollback {os.path.basename(rb)}", "", 1),
+                        )
+                    st.session_state['pending_rollback'] = None
+            with c2:
+                if st.button("Cancel", key="dash_revert_cancel"):
+                    with sqlite3.connect(cfg["db_path"]) as c:
+                        c.execute(
+                            "INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)",
+                            ("proc_run", f"Rollback {os.path.basename(rb)}", "cancel", 0),
+                        )
+                    st.session_state['pending_rollback'] = None
 
     with tab_art:
         st.subheader("Artifacts")
@@ -307,25 +324,25 @@ def render_home(cfg: dict, db: MemoryDB):
                                 st.success(
                                     f"Executed with code {proc.returncode}. Log: {log_path}"
                                 )
-                            with sqlite3.connect(cfg["db_path"]) as c:
-                                c.execute(
-                                    "INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))",
-                                    (
-                                        None,
-                                        "log",
-                                        log_path,
-                                        f"Execution log for {os.path.basename(pick)}",
-                                    ),
-                                )
-                                c.execute(
-                                    "INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)",
-                                    (
-                                        "proc_run",
-                                        f"Run script {os.path.basename(pick)}",
-                                        "\n".join(content.splitlines()[:20]),
-                                        1,
-                                    ),
-                                )
+                                with sqlite3.connect(cfg["db_path"]) as c:
+                                    c.execute(
+                                        "INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))",
+                                        (
+                                            None,
+                                            "log",
+                                            log_path,
+                                            f"Execution log for {os.path.basename(pick)}",
+                                        ),
+                                    )
+                                    c.execute(
+                                        "INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)",
+                                        (
+                                            "proc_run",
+                                            f"Run script {os.path.basename(pick)}",
+                                            "\n".join(content.splitlines()[:20]),
+                                            1,
+                                        ),
+                                    )
                                 st.session_state["pending_run_script"] = None
                         with cols[1]:
                             if st.button("Cancel"):
@@ -530,6 +547,17 @@ def render_home(cfg: dict, db: MemoryDB):
                 _y.safe_dump(cfg, f, sort_keys=False)
             st.success("Saved.")
 
+        st.subheader("Autopilot Settings")
+        ap_cfg = cfg.get("autopilot", {"push_enabled": False})
+        ap_push = st.checkbox("Allow autopilot to push a branch to remote (opt‑in)", value=ap_cfg.get("push_enabled", False), help="When enabled, Autopilot may push branch symbiont/autopilot to your Git remote.")
+        if st.button("Save Autopilot Settings"):
+            cfg.setdefault("autopilot", {})
+            cfg["autopilot"]["push_enabled"] = bool(ap_push)
+            with open("./configs/config.yaml", "w", encoding='utf-8') as f:
+                import yaml as _y
+                _y.safe_dump(cfg, f, sort_keys=False)
+            st.success("Saved.")
+
     with tab_sandbox:
         st.subheader("Sandbox (local CI-lite + staging)")
         st.caption("Tests → build → stage via Docker Compose. Daily deploy cap enforced.")
@@ -546,18 +574,48 @@ def render_home(cfg: dict, db: MemoryDB):
                 open(os.path.join(sand_root,'app','main.py'),'w').write('from fastapi import FastAPI\napp=FastAPI()\n@app.get("/healthz")\ndef healthz(): return {"status":"ok"}\n@app.get("/echo/{x}")\ndef echo(x:str): return {"echo":x}\n')
                 open(os.path.join(sand_root,'tests','test_app.py'),'w').write('from fastapi.testclient import TestClient\nfrom app.main import app\nc=TestClient(app)\n\n\ndef test_health():\n    r=c.get("/healthz"); assert r.status_code==200 and r.json()["status"]=="ok"\n\n\ndef test_echo():\n    r=c.get("/echo/hi"); assert r.json()=={"echo":"hi"}\n')
                 open(os.path.join(sand_root,'Dockerfile'),'w').write('FROM python:3.11-slim\nWORKDIR /srv\nCOPY requirements.txt /srv/requirements.txt\nRUN pip install --no-cache-dir -r /srv/requirements.txt\nCOPY app /srv/app\nEXPOSE 8000\nCMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000"]\n')
-                open(os.path.join(sand_root,'docker-compose.yml'),'w').write('services:\n  sandbox-staging:\n    build: .\n    ports: ["8001:8000"]\n    healthcheck:\n      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/healthz | grep -q ok"]\n      interval: 5s\n      timeout: 3s\n      retries: 10\n')
+                open(os.path.join(sand_root,'docker-compose.yml'),'w').write('services:\n  sandbox-staging:\n    build: .\n    ports: ["8001:8000"]\n    # Resource limits (compose may not enforce strictly; adjust as needed)\n    deploy:\n      resources:\n        limits:\n          cpus: "0.50"\n          memory: 512M\n        reservations:\n          cpus: "0.25"\n          memory: 256M\n    healthcheck:\n      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/healthz | grep -q ok"]\n      interval: 5s\n      timeout: 3s\n      retries: 10\n')
                 open(os.path.join(sand_root,'scripts','ci.sh'),'w').write('#!/usr/bin/env bash\nset -euo pipefail\ncd "$(dirname "$0")/.."\nCAP=${SANDBOX_MAX_DEPLOYS_PER_DAY:-5}\nTODAY="sandbox/.state/deploys-$(date +%F)"\ncount=0; [[ -f "$TODAY" ]] && count=$(cat "$TODAY")\nif (( count >= CAP )); then echo "[cap] daily deploy cap reached ($CAP)"; exit 2; fi\necho "[test] running pytest"\npython -m pip install -r requirements.txt >/dev/null\npython -m pytest -q\necho "[build] docker image"\ndocker build -t symbiont-sandbox:latest .\necho "[stage] up compose"\ndocker compose up -d\necho "[health] waiting for healthcheck"\nfor i in {1..30}; do\n  if curl -sf http://localhost:8001/healthz | grep -q ok; then ok=1; break; fi\n  sleep 1\ndone\nif [[ "${ok:-0}" != "1" ]]; then echo "[health] failed"; docker compose logs --no-color; docker compose down; exit 1; fi\necho "[ok] staged"\necho $((count+1)) > "$TODAY"\n')
                 os.chmod(os.path.join(sand_root,'scripts','ci.sh'), 0o755)
                 st.success("Sandbox scaffold initialized.")
         else:
             st.success("Sandbox detected at ./sandbox")
+            # Cap remaining indicator
+            try:
+                cap = int(os.environ.get('SANDBOX_MAX_DEPLOYS_PER_DAY', '5'))
+            except Exception:
+                cap = 5
+            from datetime import datetime
+            today_file = os.path.join(sand_root, '.state', f"deploys-{datetime.utcnow().strftime('%Y-%m-%d')}")
+            used = 0
+            try:
+                if os.path.exists(today_file):
+                    used = int(open(today_file,'r').read().strip() or 0)
+            except Exception:
+                used = 0
+            st.markdown(f"Deploys today: {used}/{cap}")
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("Run CI (test → build → stage)"):
                     import subprocess
-                    proc = subprocess.run(["bash","scripts/ci.sh"], cwd=sand_root, capture_output=True, text=True)
-                    st.code(proc.stdout + ("\n"+proc.stderr if proc.stderr else ""))
+                    out = st.empty()
+                    out.write("Starting CI…")
+                    proc = subprocess.Popen(["bash","scripts/ci.sh"], cwd=sand_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                    logs = []
+                    for line in proc.stdout:
+                        logs.append(line.rstrip("\n"))
+                        out.code("\n".join(logs[-200:]))
+                    proc.wait()
+                    # record last status
+                    try:
+                        os.makedirs(os.path.join(sand_root,'.state'), exist_ok=True)
+                        ts = int(time.time())
+                        with open(os.path.join(sand_root,'.state','ci_last_status'), 'w', encoding='utf-8') as f:
+                            f.write(f"{ts},{proc.returncode}\n")
+                        with open(os.path.join(sand_root,'.state','ci_last.log'), 'w', encoding='utf-8') as f:
+                            f.write("\n".join(logs))
+                    except Exception:
+                        pass
                     with sqlite3.connect(cfg["db_path"]) as c:
                         c.execute("INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)", ("proc_run", "sandbox ci", "scripts/ci.sh", 1 if proc.returncode==0 else 0))
                     if proc.returncode==0:
@@ -571,3 +629,28 @@ def render_home(cfg: dict, db: MemoryDB):
                     st.code(proc.stdout + ("\n"+proc.stderr if proc.stderr else ""))
                     with sqlite3.connect(cfg["db_path"]) as c:
                         c.execute("INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)", ("proc_run", "sandbox down", "docker compose down", 1 if proc.returncode==0 else 0))
+            st.subheader("CI Status & Logs")
+            try:
+                stt_path = os.path.join(sand_root,'.state','ci_last_status')
+                log_path = os.path.join(sand_root,'.state','ci_last.log')
+                if os.path.exists(stt_path):
+                    ts_s, code_s = open(stt_path,'r',encoding='utf-8').read().strip().split(',')
+                    st.write(f"Last run: {_rel(int(ts_s))} · exit={code_s}")
+                if os.path.exists(log_path) and st.button("Show last CI logs"):
+                    st.code(open(log_path,'r',encoding='utf-8').read())
+            except Exception:
+                pass
+
+            st.subheader("Autopilot")
+            if st.button("Run Autopilot Now"):
+                import subprocess
+                env = os.environ.copy()
+                try:
+                    if cfg.get("autopilot", {}).get("push_enabled", False):
+                        env["SYMBIONT_AUTOPILOT_PUSH"] = "1"
+                except Exception:
+                    pass
+                ap = subprocess.run(["bash","scripts/autopilot.sh"], capture_output=True, text=True, env=env)
+                st.code(ap.stdout + ("\n"+ap.stderr if ap.stderr else ""))
+                with sqlite3.connect(cfg["db_path"]) as c:
+                    c.execute("INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)", ("proc_run", "autopilot run", "scripts/autopilot.sh", 1 if ap.returncode==0 else 0))

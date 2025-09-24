@@ -36,3 +36,5 @@ browser:
   enabled: true
   allowlist:
   - https://docs.astral.sh/ruff/
+autopilot:
+  push_enabled: false
