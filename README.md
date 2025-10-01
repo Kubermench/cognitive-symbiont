@@ -1,22 +1,32 @@
-# Cognitive Symbiont — MVP v2.4
+# Cognitive Symbiont — MVP v3.5 Autonomous Edition
 This bundle includes RAG memory, a local-first LLM adapter, a Streamlit homebase, script generation, initiative daemon (file/git/timer), Beliefs v1, and stubs for Voice/IDE.
 
-## Initiative & Watchers (v2.4)
+## Initiative & Watchers (v3.5)
 - Daemon: `python -m symbiont.cli initiative_daemon` (off by default).
 - Watchers: file idle, git idle, and timer. Default trigger mode requires both idle and timer.
-- Proposals: generates a one-step plan and a non-executing apply script plus a rollback script.
+- Multi-repo: configure `initiative.watch_targets` inline or point `initiative.watch_config_path` to `configs/watch_targets.yaml` for per-repo triggers, idle timers, and `verify_rollback` flags.
+- Auto hooks: `python -m symbiont.cli install-hooks --repo <path>` installs a git `pre-push` hook that runs `sym rag_reindex` to keep RAG fresh after each push.
+- Autonomy mode: set `initiative.autonomy_mode` (`manual|guarded|full`) to control how Eternal cycles behave.
+- Proposals: generates a one-step plan and a non-executing apply script plus a rollback script (one per repo configured).
 
 ### Quick Start
 - In the UI sidebar, toggle Initiative → Enabled and set minutes, or run once via button “Propose Now (ignore watchers)”.
 - CLI: `python -m symbiont.cli initiative_once --force` to draft a proposal immediately.
 - Rollback: a `rollback_*.sh` script is saved next to `apply_*.sh`.
 
-## New Utilities (v2.4+)
+## New Utilities (v3.5)
 - Guarded actions: UI and CLI confirmations for script writes and runs; actions recorded in `audits`.
+- Reflection + mutation: each cycle feeds `data/evolution/state.json`; `sym evolve_self --scope planner` queues guarded prompt tweaks (≤5% diff) saved under `data/artifacts/mutations/` after triple sandbox validation.
+- Rollback sandbox: `python -m symbiont.cli rollback-test data/artifacts/scripts/apply_*.sh` runs apply→rollback→apply in a temp checkout to guarantee idempotence before human approval.
+- Diff preview: `python -m symbiont.cli script_diff data/artifacts/scripts/apply_*.sh` renders a git diff without touching the working tree; the VS Code command “Symbiont: Show Proposal Diff” mirrors the output in a webview.
 - Intent checkpoint: save an "intent summary" (Settings) to align future proposals.
 - Browser (read-only): allowlisted fetches into `data/artifacts/notes/` with source URLs; `tools.network_access` must be true.
-- GraphRAG-lite: add/query simple claims to inform plans.
-- MCP server (minimal): newline-delimited JSON-RPC over TCP for ports.
+- GraphRAG-lite: add/query simple claims, resolve conflicts with confidence voting, and visualise triples in BigKit.
+- Voice: cross-platform TTS via `pyttsx3`/`espeak` on Linux/Windows and `say` on macOS; STT falls back to `vosk-transcriber` if Whisper is absent.
+- Query Oracle: `sym query_web "React hooks" --limit 3` plans allowlisted searches, stores notes in `data/artifacts/notes/`, and ingests belief triples.
+- AI peer bridge: `sym peer_chat --prompt "Summarise migration risks"` simulates external conversations (stubbed unless configured).
+- GitHub guard: `sym github_pr --title "Symbiont autopilot" --dry-run false` opens PRs under allowlisted owners using PyGitHub and stored tokens.
+- MCP server (minimal) + CLI `install-hooks` for RAG automation.
 
 ### Commands
 - Graph claims:
@@ -28,6 +38,8 @@ This bundle includes RAG memory, a local-first LLM adapter, a Streamlit homebase
 ## Autopilot (optional, local)
 
 - Local script: `scripts/autopilot.sh` proposes → applies latest script (guarded `--yes`) → runs Sandbox CI if present → commits to `symbiont/autopilot`.
+- Rollback validation runs automatically before applying; failures abort the autopilot loop.
+- Eternal mode: `./scripts/autopilot.sh --mode=eternal --cycles=5 --autonomy=guarded` loops with rogue-score checks (`sym guard --script ...`) and kill-switch thresholds.
 - Cron example (Mon–Fri, every 30 min):
   - `crontab -e`
   - `*/30 9-18 * * 1-5 cd /path/to/repo && . .venv/bin/activate && ./scripts/autopilot.sh >> data/artifacts/logs/autopilot.log 2>&1`
@@ -56,10 +68,19 @@ This bundle includes RAG memory, a local-first LLM adapter, a Streamlit homebase
 - Initiative once: `sym initiative_once --force`
 - Daemon: `sym initiative_daemon`
 - Run a script with confirm: `sym run_script ./data/artifacts/scripts/apply_*.sh`
+- Install git hooks: `sym install_hooks --repo .`
+- Sandbox rollback: `sym rollback_test ./data/artifacts/scripts/apply_*.sh`
+- Diff preview: `sym script_diff ./data/artifacts/scripts/apply_*.sh`
+- Self evolution: `sym evolve_self --scope planner`
+- Query Oracle: `sym query_web "Async retries"`
+- Peer chat: `sym peer_chat --prompt "Which tests to add?"`
+- Guard scan: `sym guard --script ./data/artifacts/scripts/apply_latest.sh`
+- GitHub PR: `sym github_pr --title "Symbiont autopilot" --dry-run false`
 
 4) BigKit v3.0-alpha (multi-tab)
 - Start: `streamlit run bigkit_v3alpha/app.py`
-- Tabs: Cycles (run), Memory (browse), Beliefs (add/list), Agency (one-click proposal), Ports (stubs).
+- Tabs: Cycles (run), Memory (browse), Beliefs (statement + GraphRAG triples with graph + edit actions), Agency (one-click proposal), Ports (stubs).
+- Governance tab surfaces rogue-score metrics, reflection history, and exports compliance reports.
 
 5) VS Code Port (stub)
 - Open `vscode/symbiont-vscode` in VS Code.
@@ -67,10 +88,16 @@ This bundle includes RAG memory, a local-first LLM adapter, a Streamlit homebase
 - Run command: “Symbiont: Propose Tiny Refactor”.
 
 6) Voice-mini (stubs)
-- TTS: macOS `say` utility via `symbiont/ports/voice.py` (best effort).
-- STT: `symbiont/ports/voice_stt.py` tries `whisper` or `whisper.cpp` if installed; otherwise no-op.
+- TTS: macOS `say`, Linux `espeak`/Windows SAPI via `pyttsx3` fallback in `symbiont/ports/voice.py`.
+- STT: `symbiont/ports/voice_stt.py` tries `whisper`, `whisper.cpp`, then `vosk-transcriber` if available; otherwise no-op.
 
 ## Safety & Guardrails
 - Scripts never auto-execute. UI and CLI require explicit confirmation for `run_script`.
 - Rollback scripts are generated for quick recovery.
 - Recommend: keep a clean git working tree; consider `git stash` before applying changes.
+- Use `sym rollback_test` to validate scripts and `Symbiont: Show Proposal Diff` in VS Code for a visual check before approval.
+
+## Onboarding & Tutorial
+- Quick orientation: `python scripts/tutorial_walkthrough.py walkthrough` walks through setup, initiative, artifact inspection, and rollback validation.
+- LLM fallback: if the primary provider fails, `scripts/offline_llm.py` echoes a safe placeholder so initiative cycles stay responsive; configure via `llm.fallback` in `configs/config.yaml`.
+- Autonomy guardrails: use `sym guard --script` before approving scripts and monitor Eternal cycles with BigKit’s governance dashboard.

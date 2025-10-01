@@ -16,15 +16,38 @@ initiative:
   timer_minutes: 120
   trigger_mode: idle_and_timer
   goal_template: Repo idle; propose one 10-minute refactor and draft a script.
+  watch_config_path: ./configs/watch_targets.yaml
+  autonomy_mode: guarded
+evolution:
+  enabled: true
+  repeat_threshold: 3
+  empty_bullet_threshold: 2
 tools:
   allow_code_runner: true
   allow_files: true
   network_access: true
 llm:
-  provider: none
+  provider: ollama
   model: phi3:mini
   cmd: ''
   timeout_seconds: 25
+  fallback:
+    provider: cmd
+    cmd: "python scripts/offline_llm.py \"{prompt}\""
+    timeout_seconds: 10
+ports:
+  oracle:
+    allowlist:
+    - docs.astral.sh
+    - python.langchain.com
+    max_queries: 5
+  ai_peer:
+    stub_mode: true
+  github:
+    repository: owner/repo
+    owner_allowlist:
+    - owner
+    token_path: ~/.symbiont/github.token
 voice:
   enabled: false
   stt: none
@@ -38,3 +61,8 @@ browser:
   - https://docs.astral.sh/ruff/
 autopilot:
   push_enabled: false
+  default_mode: single
+  default_cycles: 1
+ui:
+  confirm_intent: false
+  beginner_mode: true

@@ -1,4 +1,5 @@
-import os, json, typer, yaml, sqlite3, time
+import os, json, typer, yaml, sqlite3, time, stat
+from pathlib import Path
 from rich import print as rprint
 from .orchestrator import Orchestrator
 from .memory.db import MemoryDB
@@ -6,6 +7,11 @@ from .memory import retrieval
 from .tools import repo_scan, scriptify
 from .llm.client import LLMClient
 from .initiative import daemon as initiative
+from .agents.mutation import MutationEngine, MutationIntent
+from . import guards as guard_mod
+from .ports.oracle import QueryOracle
+from .ports.ai_peer import AIPeerBridge
+from .ports.github import GitHubGuard
 from .initiative.watchers import WatchEvent  # noqa: F401 (placeholder for future use)
 from .runtime.guard import Guard, Action, Capability  # noqa: F401 (placeholder for future use)
 from .ports import browser as browser_port
@@ -16,6 +22,58 @@ app = typer.Typer(help="Cognitive Symbiont — MVP CLI v2.3")
 def load_config(path: str = "./configs/config.yaml"):
     with open(path,"r",encoding="utf-8") as f: return yaml.safe_load(f)
 
+
+def _prepare_script_sandbox(script_path: Path, cfg: dict, sandbox: str | None):
+    import shutil, tempfile
+
+    script_path = script_path.expanduser().resolve()
+    repo_root = Path(cfg.get("initiative", {}).get("repo_path", ".")).expanduser().resolve()
+    if not repo_root.exists():
+        try:
+            repo_root = script_path.parents[3]
+        except IndexError:
+            repo_root = script_path.parent
+
+    if sandbox:
+        sandbox_root = Path(sandbox).expanduser().resolve()
+        sandbox_root.mkdir(parents=True, exist_ok=True)
+        cleanup = False
+    else:
+        sandbox_root = Path(tempfile.mkdtemp(prefix="symbiont_rollback_"))
+        cleanup = True
+
+    dest_repo = sandbox_root / "workspace"
+    if dest_repo.exists():
+        shutil.rmtree(dest_repo)
+    shutil.copytree(
+        repo_root,
+        dest_repo,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns(".venv", "__pycache__", "data/artifacts/logs"),
+    )
+
+    rollback_name = script_path.name.replace("apply_", "rollback_", 1)
+
+    try:
+        rel_script = script_path.relative_to(repo_root)
+    except ValueError:
+        try:
+            rel_script = script_path.relative_to(Path.cwd())
+        except ValueError:
+            rel_script = Path("data/artifacts/scripts") / script_path.name
+
+    dest_script = dest_repo / Path(rel_script)
+    dest_rollback = dest_script.parent / rollback_name
+
+    return {
+        "repo_root": repo_root,
+        "sandbox_root": sandbox_root,
+        "dest_repo": dest_repo,
+        "dest_script": dest_script,
+        "dest_rollback": dest_rollback,
+        "cleanup": cleanup,
+    }
+
 @app.command()
 def init(config_path: str = "./configs/config.yaml"):
     cfg=load_config(config_path); db=MemoryDB(db_path=cfg["db_path"]); db.ensure_schema()
@@ -25,6 +83,36 @@ def init(config_path: str = "./configs/config.yaml"):
 def rag_reindex(config_path: str = "./configs/config.yaml"):
     cfg=load_config(config_path); db=MemoryDB(db_path=cfg["db_path"]); db.ensure_schema()
     n=retrieval.build_indices(db); rprint(f"[green]Indexed[/green] {n} items.")
+
+
+@app.command()
+def install_hooks(config_path: str = "./configs/config.yaml", repo: list[str] = typer.Option(None, "--repo", help="One or more repo roots to install Symbiont hooks")):
+    """Install a lightweight git pre-push hook that rebuilds RAG indices."""
+    cfg=load_config(config_path)
+    default_repo = cfg.get("initiative", {}).get("repo_path", ".")
+    targets = repo or [default_repo]
+    sym_home = Path(__file__).resolve().parents[1]
+    cfg_path_abs = os.path.abspath(config_path)
+    for root in targets:
+        root_path = Path(root).expanduser().resolve()
+        hooks_dir = root_path / ".git" / "hooks"
+        if not hooks_dir.exists():
+            rprint(f"[yellow]Skip {root_path}: .git/hooks not found.")
+            continue
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        hook_path = hooks_dir / "pre-push"
+        script = """#!/usr/bin/env bash
+set -euo pipefail
+SYMBIONT_HOME="{sym_home}"
+CONFIG_PATH="{cfg}"
+PYTHON_BIN="${{PYTHON_BIN:-python}}"
+cd "$SYMBIONT_HOME"
+$PYTHON_BIN -m symbiont.cli rag_reindex --config-path "$CONFIG_PATH"
+exit 0
+""".format(sym_home=sym_home, cfg=cfg_path_abs)
+        hook_path.write_text(script, encoding="utf-8")
+        hook_path.chmod(hook_path.stat().st_mode | stat.S_IEXEC)
+        rprint(f"[green]Installed pre-push hook at[/green] {hook_path}")
 
 @app.command()
 def rag_search(query: str, k: int = 5, config_path: str = "./configs/config.yaml"):
@@ -83,9 +171,10 @@ def initiative_once(config_path: str = "./configs/config.yaml", force: bool = Fa
         res = initiative.propose_once(cfg, reason="forced")
         rprint("[green]Proposed (forced). Episode:[/green]", res.get("episode_id"))
         return
-    ok, reasons, res = initiative.run_once_if_triggered(cfg)
+    ok, reasons, res, target = initiative.run_once_if_triggered(cfg)
     if ok:
-        rprint("[green]Proposed.[/green] reasons:", ",".join(reasons), "episode:", res.get("episode_id"))
+        repo_hint = f" repo={getattr(target, 'path', '-')}" if target else ""
+        rprint("[green]Proposed.[/green] reasons:", ",".join(reasons), repo_hint, "episode:", res.get("episode_id"))
     else:
         rprint("[yellow]No proposal. Reasons:", ",".join(reasons))
 
@@ -149,6 +238,183 @@ def run_script(path: str, yes: bool = False, config_path: str = "./configs/confi
         preview = "\n".join(preview.splitlines()[:20])
         c.execute("INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)", ("proc_run", f"Run script {os.path.basename(path)}", preview, 1))
 
+
+@app.command()
+def rollback_test(script: str, sandbox: str = typer.Option(None, "--sandbox", help="Optional existing sandbox directory"), config_path: str = "./configs/config.yaml"):
+    """Validate apply/rollback scripts by running them in a throwaway workspace."""
+    import shutil, subprocess
+
+    cfg = load_config(config_path)
+    script_path = Path(script).expanduser().resolve()
+    if not script_path.exists():
+        rprint(f"[red]Script not found:[/red] {script_path}")
+        raise typer.Exit(1)
+    if "apply_" not in script_path.name:
+        rprint("[yellow]Expected an apply_*.sh script for validation.")
+    rollback_name = script_path.name.replace("apply_", "rollback_", 1)
+    rollback_path = script_path.parent / rollback_name
+    if not rollback_path.exists():
+        rprint(f"[red]Matching rollback script not found:[/red] {rollback_path}")
+        raise typer.Exit(1)
+
+    ctx = _prepare_script_sandbox(script_path, cfg, sandbox)
+    dest_repo = ctx["dest_repo"]
+    dest_script = ctx["dest_script"]
+    dest_rollback = ctx["dest_rollback"]
+    sandbox_root = ctx["sandbox_root"]
+    cleanup = ctx["cleanup"]
+
+    if not dest_script.exists() or not dest_rollback.exists():
+        rprint("[red]Copied sandbox missing scripts. Ensure repo root is correct.")
+        if cleanup:
+            shutil.rmtree(sandbox_root, ignore_errors=True)
+        raise typer.Exit(1)
+
+    def _run(label: str, path_obj: Path):
+        proc = subprocess.run(["bash", str(path_obj.resolve())], cwd=dest_repo, capture_output=True, text=True)
+        if proc.returncode != 0:
+            rprint(f"[red]{label} failed (exit {proc.returncode}).[/red]\n" + (proc.stdout or "") + (proc.stderr or ""))
+            if cleanup:
+                shutil.rmtree(sandbox_root, ignore_errors=True)
+            raise typer.Exit(proc.returncode)
+        return proc.stdout, proc.stderr
+
+    rprint(f"[cyan]Sandboxed rollback test under[/cyan] {dest_repo}")
+    _run("apply", dest_script)
+    _run("rollback", dest_rollback)
+    _run("apply(second)", dest_script)
+    rprint("[green]Rollback verified idempotent.[/green]")
+
+    if cleanup:
+        shutil.rmtree(sandbox_root, ignore_errors=True)
+
+
+@app.command()
+def script_diff(script: str, sandbox: str = typer.Option(None, "--sandbox", help="Optional existing sandbox directory"), config_path: str = "./configs/config.yaml"):
+    """Show a git diff preview after applying an apply_*.sh script in a sandbox."""
+    import shutil, subprocess
+
+    cfg = load_config(config_path)
+    script_path = Path(script).expanduser().resolve()
+    if not script_path.exists():
+        rprint(f"[red]Script not found:[/red] {script_path}")
+        raise typer.Exit(1)
+
+    ctx = _prepare_script_sandbox(script_path, cfg, sandbox)
+    dest_repo = ctx["dest_repo"]
+    dest_script = ctx["dest_script"]
+    sandbox_root = ctx["sandbox_root"]
+    cleanup = ctx["cleanup"]
+
+    if not dest_script.exists():
+        rprint("[red]Copied sandbox missing script. Ensure repo root is correct.")
+        if cleanup:
+            shutil.rmtree(sandbox_root, ignore_errors=True)
+        raise typer.Exit(1)
+
+    proc = subprocess.run(["bash", str(dest_script.resolve())], cwd=dest_repo, capture_output=True, text=True)
+    if proc.returncode != 0:
+        rprint(f"[red]apply failed (exit {proc.returncode}).[/red]\n" + (proc.stdout or "") + (proc.stderr or ""))
+        if cleanup:
+            shutil.rmtree(sandbox_root, ignore_errors=True)
+        raise typer.Exit(proc.returncode)
+
+    diff = subprocess.run(["git", "diff", "--no-color"], cwd=dest_repo, capture_output=True, text=True)
+    if diff.returncode != 0:
+        rprint("[yellow]git diff unavailable in sandbox.")
+    else:
+        print(diff.stdout)
+
+    if cleanup:
+        shutil.rmtree(sandbox_root, ignore_errors=True)
+
+
+@app.command()
+def guard(script: str = typer.Option(None, "--script", help="Path to script to analyse"), plan: str = typer.Option(None, "--plan", help="Path to plan markdown"), json_out: bool = typer.Option(False, "--json", help="Return machine readable output")):
+    """Run guard heuristics against scripts or plans."""
+
+    report: Dict[str, Any] = {}
+    if script:
+        report = guard_mod.analyze_script(Path(script))
+    if plan:
+        plan_path = Path(plan)
+        ptext = plan_path.read_text(encoding="utf-8") if plan_path.exists() else ""
+        plan_report = guard_mod.analyze_plan(ptext)
+        report.setdefault("plan", plan_report)
+    if not report:
+        rprint("[yellow]Nothing to analyse. Provide --script or --plan.")
+        raise typer.Exit(1)
+    if json_out:
+        print(guard_mod.serialize_report(report))
+    else:
+        rprint(f"[bold]Rogue score:[/bold] {report.get('rogue_score', 0.0)}")
+        if report.get("issues"):
+            for issue in report["issues"]:
+                rprint(f" - [red]{issue['reason']}[/red] (weight {issue['weight']})")
+        plan_flags = (report.get("plan") or {}).get("flags", [])
+        if plan_flags:
+            for flag in plan_flags:
+                rprint(f" - [yellow]{flag}[/yellow]")
+
+
+@app.command()
+def evolve_self(scope: str = typer.Option("planner", "--scope", case_sensitive=False, help="Mutation scope"), strategy: str = typer.Option("promote_diversity", "--strategy", help="Mutation strategy"), config_path: str = "./configs/config.yaml"):
+    """Manually trigger a self-evolution proposal."""
+
+    cfg = load_config(config_path)
+    engine = MutationEngine(cfg)
+    scope = scope.lower()
+    if scope != "planner":
+        rprint("[yellow]Currently only planner scope is supported.")
+        raise typer.Exit(1)
+    intent = MutationIntent(
+        kind="planner_prompt",
+        rationale=f"Manual evolution request with strategy {strategy}",
+        details={"strategy": strategy},
+    )
+    engine.schedule(intent)
+    rprint("[green]Evolution intent queued. Inspect data/artifacts/mutations for proposals.[/green]")
+
+
+@app.command()
+def query_web(prompt: str, limit: int = typer.Option(3, "--limit", help="Maximum number of queries"), config_path: str = "./configs/config.yaml"):
+    """Guarded search assistant that ingests findings into the belief store."""
+
+    cfg = load_config(config_path)
+    oracle = QueryOracle(cfg)
+    results = oracle.run(prompt, limit=limit)
+    if not results:
+        rprint("[yellow]No oracle results (check allowlist or connectivity).")
+        return
+    for res in results:
+        rprint(f"[green]Query:[/green] {res.query}\n  URL: {res.url}\n  Note: {res.note_path}\n  Triples: {res.triples}")
+
+
+@app.command()
+def peer_chat(prompt: str, simulate: bool = typer.Option(False, "--simulate", help="Force simulation only"), config_path: str = "./configs/config.yaml"):
+    """Talk to a guarded AI peer (stubbed unless configured)."""
+
+    cfg = load_config(config_path)
+    bridge = AIPeerBridge(cfg)
+    transcript = bridge.chat(prompt, simulate_only=simulate)
+    mode = "simulation" if transcript.simulated else "live"
+    rprint(f"[green]{mode} peer response saved:[/green] {transcript.path}")
+    print(transcript.response)
+
+
+@app.command()
+def github_pr(title: str, body: str = typer.Option("Autopilot proposal", "--body"), head: str = typer.Option("symbiont/autopilot", "--head"), base: str = typer.Option(None, "--base"), dry_run: bool = typer.Option(True, "--dry-run"), config_path: str = "./configs/config.yaml"):
+    """Create a guarded pull request for the current repository."""
+
+    cfg = load_config(config_path)
+    guard = GitHubGuard(cfg)
+    result = guard.create_pull_request(title=title, body=body, head=head, base=base, dry_run=dry_run)
+    status = "dry-run" if result.dry_run else "submitted"
+    rprint(f"[green]GitHub PR {status}:[/green] {result.message}")
+    if result.url:
+        rprint(f"URL: {result.url}")
+
+
 @app.command()
 def latest_artifact(type: str = "script", config_path: str = "./configs/config.yaml"):
     """Print path to latest artifact of a given type (plan/script/log)."""
@@ -199,8 +465,13 @@ def graph_add_claim(subject: str, relation: str, obj: str, importance: float = 0
     """Add a GraphRAG-lite claim: <subject> <relation> <object> (with optional importance, source)."""
     cfg=load_config(config_path)
     db=MemoryDB(db_path=cfg['db_path']); db.ensure_schema()
-    cid = graphrag.add_claim(db, subject, relation, obj, importance=importance, source_url=(source_url or None))
-    rprint(f"[green]Added claim #[/green]{cid}: {subject} {relation} {obj}")
+    cid, status = graphrag.add_claim(db, subject, relation, obj, importance=importance, source_url=(source_url or None))
+    if status == "inserted":
+        rprint(f"[green]Added claim #[/green]{cid}: {subject} {relation} {obj}")
+    elif status == "merged":
+        rprint(f"[green]Merged claim #[/green]{cid}: {subject} {relation} {obj} (confidence vote)")
+    else:
+        rprint(f"[yellow]Vote recorded.[/yellow] Winner claim #{cid} retained for {subject} {relation} *")
 
 @app.command()
 def graph_query(term: str, k: int = 5, config_path: str = "./configs/config.yaml"):

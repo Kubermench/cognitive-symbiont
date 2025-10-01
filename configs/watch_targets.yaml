@@ -1,0 +1,9 @@
+# Symbiont initiative multi-repo watcher configuration
+repositories:
+  - path: .
+    watchers: [file, git, timer]
+    idle_minutes: 60
+    git_idle_minutes: 60
+    timer_minutes: 180
+    trigger_mode: idle_and_timer
+    verify_rollback: false

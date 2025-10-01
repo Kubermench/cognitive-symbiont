@@ -6,6 +6,7 @@ from .memory.db import MemoryDB
 from .memory import retrieval
 from .memory import graphrag
 from .agents.subself import SubSelf
+from .agents.reflector import CycleReflector
 from .tools.files import ensure_dirs
 from .memory import beliefs as belief_api
 from .tools import scriptify
@@ -18,6 +19,7 @@ class Orchestrator:
             import yaml; self.roles = yaml.safe_load(f).get('roles', [])
         self.subselves = [SubSelf(role=r, config=config) for r in self.roles]
         ensure_dirs([os.path.dirname(config['db_path'] or './data/symbiont.db')])
+        self.reflector = CycleReflector(config)
 
     def cycle(self, goal: str) -> Dict[str, Any]:
         self.db.ensure_schema()
@@ -40,8 +42,13 @@ class Orchestrator:
             with self.db._conn() as c:
                 c.execute("INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))", (None,'script',spath,'Script from bullets'))
                 c.execute("INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))", (None,'script',rpath,'Rollback script'))
+        result = {"episode_id": eid, "decision": decision, "trace": trace}
+        try:
+            self.reflector.observe_cycle(result)
+        except Exception as exc:  # pragma: no cover - reflection should not break main flow
+            rprint(f"[yellow]Reflection skipped:[/yellow] {exc}")
         rprint("[bold green]Consensus Action:[/bold green]", decision["action"], "\n[dim]Saved:", plan)
-        return {"episode_id": eid, "decision": decision, "trace": trace}
+        return result
 
     def _consensus(self, trace: List[Dict[str, Any]]) -> Dict[str, Any]:
         arch = next((o for o in trace if o["role"]=="architect"), None)

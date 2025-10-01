@@ -29,6 +29,13 @@ def _latest_artifact(db_path: str, kind: str):
         ).fetchone()
     return (row[0], row[1], row[2]) if row else (None, None, None)
 
+def _latest_apply_script(db_path: str):
+    with sqlite3.connect(db_path) as c:
+        row = c.execute(
+            "SELECT path, created_at FROM artifacts WHERE type='script' AND path LIKE '%apply_%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return (row[0], row[1]) if row else (None, None)
+
 
 def render_home(cfg: dict, db: MemoryDB):
     st.title("🧠 Cognitive Symbiont — Homebase (v2.4)")
@@ -41,6 +48,9 @@ def render_home(cfg: dict, db: MemoryDB):
         st.markdown("**How it works** — scout → architect → critic → plan + safe script (never auto‑runs). You approve; everything is logged and reversible.")
         with st.expander("Learn more (council, memory, guards)"):
             st.markdown("- Council: scout gathers, architect proposes, critic vets.\n- Memory: beliefs + claims + allowlisted notes.\n- Guards: fs_write / proc_run / net_read need explicit approval; audits record every decision.")
+        ui_cfg = cfg.get("ui", {})
+        confirm_intent = bool(ui_cfg.get("confirm_intent", False))
+        beginner_mode = bool(ui_cfg.get("beginner_mode", False))
         cols = st.columns(3)
         with cols[0]:
             info = repo_scan.inspect_repo(".")
@@ -60,8 +70,23 @@ def render_home(cfg: dict, db: MemoryDB):
         q1, q2, q3, q4 = st.columns(4)
         with q1:
             if st.button("Run Cycle", key="dash_run_cycle"):
-                st.session_state['pending_action'] = ('cycle', None)
-            if st.session_state.get('pending_action') == ('cycle', None):
+                from symbiont.memory.db import MemoryDB as _DB
+                _db = _DB(cfg["db_path"]) ; _db.ensure_schema()
+                li = _db.latest_intent()
+                goal = (li or {}).get('summary','Propose one 10-minute refactor for my repo')
+                if not confirm_intent:
+                    from symbiont.orchestrator import Orchestrator
+                    res = Orchestrator(cfg).cycle(goal=goal)
+                    st.success(res["decision"]["action"])
+                    st.code(json.dumps(res["trace"], indent=2))
+                    with sqlite3.connect(cfg["db_path"]) as c:
+                        c.execute(
+                            "INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)",
+                            ("plan", "Run Cycle (auto)", goal, 1),
+                        )
+                else:
+                    st.session_state['pending_action'] = ('cycle', None)
+            if st.session_state.get('pending_action') == ('cycle', None) and confirm_intent:
                 from symbiont.memory.db import MemoryDB as _DB
                 _db = _DB(cfg["db_path"]) ; _db.ensure_schema()
                 li = _db.latest_intent()
@@ -84,8 +109,20 @@ def render_home(cfg: dict, db: MemoryDB):
                         st.session_state['pending_action'] = None
         with q2:
             if st.button("Propose Now", key="dash_prop_now"):
-                st.session_state['pending_action'] = ('propose', None)
-            if st.session_state.get('pending_action') == ('propose', None):
+                from symbiont.memory.db import MemoryDB as _DB
+                _db = _DB(cfg["db_path"]) ; _db.ensure_schema()
+                li = _db.latest_intent()
+                if not confirm_intent:
+                    res = initiative.propose_once(cfg, reason="dashboard")
+                    st.success(f"Proposed. Episode {res.get('episode_id')}")
+                    with sqlite3.connect(cfg["db_path"]) as c:
+                        c.execute(
+                            "INSERT INTO audits (capability, description, preview, approved) VALUES (?,?,?,?)",
+                            ("initiative", "Propose Now (auto)", (li or {}).get('summary',''), 1),
+                        )
+                else:
+                    st.session_state['pending_action'] = ('propose', None)
+            if st.session_state.get('pending_action') == ('propose', None) and confirm_intent:
                 from symbiont.memory.db import MemoryDB as _DB
                 _db = _DB(cfg["db_path"]) ; _db.ensure_schema()
                 li = _db.latest_intent()
@@ -105,11 +142,11 @@ def render_home(cfg: dict, db: MemoryDB):
                     if st.button("Cancel", key="dash_prop_cancel"):
                         st.session_state['pending_action'] = None
         with q3:
-            if st.button("Rebuild RAG", key="dash_rag"):
+            if not beginner_mode and st.button("Rebuild RAG", key="dash_rag"):
                 n = retrieval.build_indices(db)
                 st.info(f"Indexed {n} items.")
         with q4:
-            if st.button("Scriptify Last Bullets", key="dash_scriptify"):
+            if not beginner_mode and st.button("Scriptify Last Bullets", key="dash_scriptify"):
                 with sqlite3.connect(cfg["db_path"]) as c:
                     row = c.execute(
                         "SELECT content FROM messages WHERE role='architect' ORDER BY id DESC LIMIT 1"
@@ -138,7 +175,7 @@ def render_home(cfg: dict, db: MemoryDB):
 
         st.subheader("Latest Outputs")
         lp, lps, lpt = _latest_artifact(cfg["db_path"], "plan")
-        ls, lss, lst = _latest_artifact(cfg["db_path"], "script")
+        ls, lst = _latest_apply_script(cfg["db_path"])  # prefer apply scripts
         c1, c2 = st.columns(2)
         with c1:
             st.caption("Latest plan")
@@ -151,7 +188,7 @@ def render_home(cfg: dict, db: MemoryDB):
             else:
                 st.info("No plan yet. Run a cycle to create one.")
         with c2:
-            st.caption("Latest script")
+            st.caption("Latest script (safe to run)")
             if ls and ls.endswith(".sh"):
                 st.write(f"{ls} · {_rel(lst)}")
                 content = open(ls, "r", encoding="utf-8").read()
@@ -163,6 +200,8 @@ def render_home(cfg: dict, db: MemoryDB):
                         st.session_state["pending_run_script"] = ls
                         st.warning("Confirm execution below. Review preview.")
                 else:
+                    # Show a fresh preview right next to the guard message so it's visible
+                    st.code("\n".join(content.splitlines()[:40]) or "(empty)")
                     cols = st.columns(2)
                     with cols[0]:
                         if st.button("Confirm Execute Now", key="dash_confirm_exec"):
@@ -209,7 +248,22 @@ def render_home(cfg: dict, db: MemoryDB):
                                 )
                             st.session_state["pending_run_script"] = None
             else:
-                st.info("No script yet. Use Scriptify or run a cycle.")
+                st.info("No ready-to-run script yet.")
+                if st.button("Generate Script from Last Plan", key="dash_generate_script"):
+                    with sqlite3.connect(cfg["db_path"]) as c:
+                        row = c.execute("SELECT content FROM messages WHERE role='architect' ORDER BY id DESC LIMIT 1").fetchone()
+                    if not row:
+                        st.warning("No plan found. Click 'Run Cycle' first.")
+                    else:
+                        try:
+                            bullets = json.loads(row[0]).get("bullets", [])
+                        except Exception:
+                            bullets = []
+                        if not bullets:
+                            st.warning("Last plan had no concrete steps. Try 'Run Cycle' again.")
+                        else:
+                            path = scriptify.write_script(bullets, base_dir=os.path.join(os.path.dirname(cfg["db_path"]), "artifacts","scripts"))
+                            st.success(f"Script saved at: {path}. You can now click 'Run Safely'.")
 
         st.subheader("Guard Console (last 10 decisions)")
         try:
@@ -260,7 +314,7 @@ def render_home(cfg: dict, db: MemoryDB):
                     st.session_state['pending_rollback'] = None
 
     with tab_art:
-        st.subheader("Artifacts")
+        st.subheader("Outputs & Scripts")
         with sqlite3.connect(cfg["db_path"]) as c:
             arts_all = [
                 {
@@ -276,11 +330,11 @@ def render_home(cfg: dict, db: MemoryDB):
                 )
             ]
         kinds = ["all", "plan", "script", "log"]
-        kpick = st.selectbox("Filter by type", kinds, index=0)
+        kpick = st.selectbox("Filter by type", kinds, index=0, help="Pick what you want to see: plans, scripts, logs, or notes")
         arts = [a for a in arts_all if (kpick == "all" or a["type"] == kpick)]
         st.dataframe(arts, use_container_width=True)
         sel = [a["path"] for a in arts]
-        pick = st.selectbox("Open artifact", sel if sel else [""])
+        pick = st.selectbox("Open item", sel if sel else [""], help="Select a file to preview")
         if pick:
             try:
                 content = open(pick, "r", encoding="utf-8").read()
@@ -302,7 +356,7 @@ def render_home(cfg: dict, db: MemoryDB):
                         st.warning(
                             "Confirm: Running this may modify files. Ensure git is clean or you have backups."
                         )
-                        st.code("\n".join(content.splitlines()[:40]))
+                        st.code("\n".join(content.splitlines()[:40]) or "(empty)")
                         cols = st.columns(2)
                         with cols[0]:
                             if st.button("Confirm Execute Now"):
@@ -383,7 +437,7 @@ def render_home(cfg: dict, db: MemoryDB):
         st.dataframe(tasks, use_container_width=True)
 
     with tab_settings:
-        st.subheader("LLM Settings")
+        st.subheader("LLM (Brain) Settings")
         prov = st.selectbox(
             "Provider",
             ["none", "ollama", "cmd"],
@@ -400,10 +454,25 @@ def render_home(cfg: dict, db: MemoryDB):
                 _y.safe_dump(cfg, f, sort_keys=False)
             st.success("Saved.")
 
-        st.subheader("RAG")
+        st.subheader("Search past notes & outputs (RAG)")
+        with st.expander("What is RAG? (plain English)"):
+            st.markdown("RAG = Retrieval‑Augmented Generation. Before writing a plan, I quickly look back through your saved notes, plans, and messages to pull in relevant context. This keeps me grounded in your project history instead of guessing.")
         if st.button("Rebuild Index"):
             n = retrieval.build_indices(db)
             st.success(f"Indexed {n} items.")
+
+        st.subheader("UI Preferences")
+        ui_cfg = cfg.get("ui", {})
+        ui_confirm = st.checkbox("Ask me to confirm intent before each run", value=bool(ui_cfg.get("confirm_intent", False)))
+        ui_beginner = st.checkbox("Beginner Mode (hide advanced controls)", value=bool(ui_cfg.get("beginner_mode", True)))
+        if st.button("Save UI Preferences"):
+            cfg.setdefault("ui", {})
+            cfg["ui"]["confirm_intent"] = bool(ui_confirm)
+            cfg["ui"]["beginner_mode"] = bool(ui_beginner)
+            with open("./configs/config.yaml", "w", encoding='utf-8') as f:
+                import yaml as _y
+                _y.safe_dump(cfg, f, sort_keys=False)
+            st.success("Saved.")
 
         st.subheader("Initiative Settings")
         ini = cfg.get("initiative", {})
