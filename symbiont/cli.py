@@ -1,5 +1,6 @@
 import os, json, typer, yaml, sqlite3, time, stat
 from pathlib import Path
+from typing import Optional
 from rich import print as rprint
 from .orchestrator import Orchestrator
 from .memory.db import MemoryDB
@@ -8,6 +9,7 @@ from .tools import repo_scan, scriptify
 from .llm.client import LLMClient
 from .initiative import daemon as initiative
 from .agents.mutation import MutationEngine, MutationIntent
+from .agents.swarm import SwarmCoordinator
 from . import guards as guard_mod
 from .ports.oracle import QueryOracle
 from .ports.ai_peer import AIPeerBridge
@@ -374,6 +376,33 @@ def evolve_self(scope: str = typer.Option("planner", "--scope", case_sensitive=F
     )
     engine.schedule(intent)
     rprint("[green]Evolution intent queued. Inspect data/artifacts/mutations for proposals.[/green]")
+
+
+@app.command()
+def swarm_evolve(
+    belief: Optional[str] = typer.Argument(None, help="Belief triple or hint (e.g., 'subject->relation->object')."),
+    variants: int = typer.Option(3, "--variants", help="Number of swarm forks"),
+    auto: bool = typer.Option(False, "--auto", help="Use latest belief when available"),
+    config_path: str = "./configs/config.yaml",
+):
+    """Run swarm evolution across planner/belief space."""
+
+    cfg = load_config(config_path)
+    swarm = SwarmCoordinator(cfg)
+    if not swarm.enabled:
+        rprint("[yellow]Swarm evolution disabled (set evolution.swarm_enabled=true).")
+        raise typer.Exit(1)
+    winners = swarm.run(belief or "", variants=variants, auto=auto)
+    if not winners:
+        rprint("[yellow]No swarm winners produced.")
+        return
+    for variant in winners:
+        triple = variant.triple
+        rprint(
+            f"[green]Winner:[/green] {triple['subject']} -> {triple['relation']} -> {triple['object']} (score {variant.score:.2f})"
+        )
+        if variant.justification:
+            rprint(f"  justification: {variant.justification}")
 
 
 @app.command()

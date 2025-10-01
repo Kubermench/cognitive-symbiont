@@ -17,6 +17,7 @@ This bundle includes RAG memory, a local-first LLM adapter, a Streamlit homebase
 ## New Utilities (v3.5)
 - Guarded actions: UI and CLI confirmations for script writes and runs; actions recorded in `audits`.
 - Reflection + mutation: each cycle feeds `data/evolution/state.json`; `sym evolve_self --scope planner` queues guarded prompt tweaks (≤5% diff) saved under `data/artifacts/mutations/` after triple sandbox validation.
+- Swarm evolution: enable `evolution.swarm_enabled=true` to spawn parallel belief variants, score via peer chats, and merge consensus claims (`sym swarm_evolve "belief: UI->prefers->dark_mode"`).
 - Rollback sandbox: `python -m symbiont.cli rollback-test data/artifacts/scripts/apply_*.sh` runs apply→rollback→apply in a temp checkout to guarantee idempotence before human approval.
 - Diff preview: `python -m symbiont.cli script_diff data/artifacts/scripts/apply_*.sh` renders a git diff without touching the working tree; the VS Code command “Symbiont: Show Proposal Diff” mirrors the output in a webview.
 - Intent checkpoint: save an "intent summary" (Settings) to align future proposals.
@@ -40,6 +41,7 @@ This bundle includes RAG memory, a local-first LLM adapter, a Streamlit homebase
 - Local script: `scripts/autopilot.sh` proposes → applies latest script (guarded `--yes`) → runs Sandbox CI if present → commits to `symbiont/autopilot`.
 - Rollback validation runs automatically before applying; failures abort the autopilot loop.
 - Eternal mode: `./scripts/autopilot.sh --mode=eternal --cycles=5 --autonomy=guarded` loops with rogue-score checks (`sym guard --script ...`) and kill-switch thresholds.
+- Swarm mode: append `--swarm=true` to autopilot to fork mini-agents, evaluate with peers, and merge consensus updates.
 - Cron example (Mon–Fri, every 30 min):
   - `crontab -e`
   - `*/30 9-18 * * 1-5 cd /path/to/repo && . .venv/bin/activate && ./scripts/autopilot.sh >> data/artifacts/logs/autopilot.log 2>&1`

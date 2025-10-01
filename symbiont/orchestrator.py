@@ -7,6 +7,7 @@ from .memory import retrieval
 from .memory import graphrag
 from .agents.subself import SubSelf
 from .agents.reflector import CycleReflector
+from .agents.swarm import SwarmCoordinator
 from .tools.files import ensure_dirs
 from .memory import beliefs as belief_api
 from .tools import scriptify
@@ -20,6 +21,8 @@ class Orchestrator:
         self.subselves = [SubSelf(role=r, config=config) for r in self.roles]
         ensure_dirs([os.path.dirname(config['db_path'] or './data/symbiont.db')])
         self.reflector = CycleReflector(config)
+        swarm_candidate = SwarmCoordinator(config)
+        self.swarm = swarm_candidate if swarm_candidate.enabled else None
 
     def cycle(self, goal: str) -> Dict[str, Any]:
         self.db.ensure_schema()
@@ -47,6 +50,11 @@ class Orchestrator:
             self.reflector.observe_cycle(result)
         except Exception as exc:  # pragma: no cover - reflection should not break main flow
             rprint(f"[yellow]Reflection skipped:[/yellow] {exc}")
+        if self.swarm:
+            try:
+                self.swarm.after_cycle(result)
+            except Exception as exc:  # pragma: no cover
+                rprint(f"[yellow]Swarm evolution skipped:[/yellow] {exc}")
         rprint("[bold green]Consensus Action:[/bold green]", decision["action"], "\n[dim]Saved:", plan)
         return result
 

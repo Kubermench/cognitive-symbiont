@@ -8,6 +8,7 @@ export PYTHONUNBUFFERED=1
 MODE="single"
 CYCLES=1
 AUTONOMY="guarded"
+SWARM=false
 THRESHOLD_GUARDED=0.5
 THRESHOLD_FULL=0.85
 
@@ -19,6 +20,8 @@ while [[ $# -gt 0 ]]; do
     --cycles) CYCLES="$2"; shift ;;
     --autonomy=*) AUTONOMY="${1#*=}" ;;
     --autonomy) AUTONOMY="$2"; shift ;;
+    --swarm=*) SWARM="${1#*=}" ;;
+    --swarm) SWARM="$2"; shift ;;
     *) echo "[autopilot] unknown flag $1"; exit 2 ;;
   esac
   shift
@@ -112,6 +115,10 @@ PY
   fi
 
   python -m symbiont.cli evolve_self --scope planner --strategy promote_diversity || true
+
+  if [[ "$SWARM" == "true" || "$SWARM" == "1" ]]; then
+    python -m symbiont.cli swarm_evolve --auto --variants 3 || true
+  fi
 
   if command -v git >/dev/null 2>&1; then
     if [ -n "$(git status --porcelain || true)" ]; then

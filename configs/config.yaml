@@ -22,6 +22,10 @@ evolution:
   enabled: true
   repeat_threshold: 3
   empty_bullet_threshold: 2
+  swarm_enabled: true
+  swarm_variants: 3
+  swarm_timeout: 20
+  swarm_max_delta: 0.05
 tools:
   allow_code_runner: true
   allow_files: true
@@ -63,6 +67,7 @@ autopilot:
   push_enabled: false
   default_mode: single
   default_cycles: 1
+  default_swarm: false
 ui:
   confirm_intent: false
   beginner_mode: true
