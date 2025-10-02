@@ -39,6 +39,18 @@ def _latest_apply_script(db_path: str):
 
 def render_home(cfg: dict, db: MemoryDB):
     st.title("🧠 Cognitive Symbiont — Homebase (v2.4)")
+    st.markdown(
+        "Welcome! Symbiont drafts small, reviewable changes for you. **You stay in control**—every script pauses for approval and every step is logged so you can undo it later."
+    )
+    st.info(
+        "**Three quick steps:** 1) Click *Run a cycle* to let Symbiont suggest a tiny fix. 2) Read the plan it generates. 3) If it looks good, press *Run safely* and confirm."
+    )
+    with st.expander("What happens behind the scenes?", expanded=False):
+        st.markdown(
+            "- **Team of roles:** the scout gathers context, the architect drafts the change, and the critic double-checks it.\n"
+            "- **Memory:** notes, beliefs, and past scripts are saved so future plans stay aligned with your goals.\n"
+            "- **Guard rails:** scripts never run automatically; file writes, command runs, and web fetches all wait for you to approve them and are recorded in the audit log."
+        )
 
     tab_dash, tab_art, tab_ep, tab_settings, tab_sandbox = st.tabs(
         ["Dashboard", "Outputs & Scripts", "Episodes & Tasks", "Settings", "Sandbox"]
@@ -66,10 +78,12 @@ def render_home(cfg: dict, db: MemoryDB):
                 ca = c.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
             st.markdown(f"**Memory**: episodes={ce} · artifacts={ca}")
 
-        st.subheader("Quick Actions")
+        st.subheader("Take an action")
+        st.caption("Choose what you need right now. Symbiont handles the technical work and keeps a full paper trail.")
         q1, q2, q3, q4 = st.columns(4)
         with q1:
-            if st.button("Run Cycle", key="dash_run_cycle"):
+            st.caption("1. Ask Symbiont for a fresh idea")
+            if st.button("Run a cycle", key="dash_run_cycle"):
                 from symbiont.memory.db import MemoryDB as _DB
                 _db = _DB(cfg["db_path"]) ; _db.ensure_schema()
                 li = _db.latest_intent()
@@ -105,10 +119,11 @@ def render_home(cfg: dict, db: MemoryDB):
                             )
                         st.session_state['pending_action'] = None
                 with c2:
-                    if st.button("Cancel", key="dash_cycle_cancel"):
+                    if st.button("Not now", key="dash_cycle_cancel"):
                         st.session_state['pending_action'] = None
         with q2:
-            if st.button("Propose Now", key="dash_prop_now"):
+            st.caption("2. Trigger the initiative watch")
+            if st.button("Propose now", key="dash_prop_now"):
                 from symbiont.memory.db import MemoryDB as _DB
                 _db = _DB(cfg["db_path"]) ; _db.ensure_schema()
                 li = _db.latest_intent()
@@ -139,14 +154,19 @@ def render_home(cfg: dict, db: MemoryDB):
                             )
                         st.session_state['pending_action'] = None
                 with c2:
-                    if st.button("Cancel", key="dash_prop_cancel"):
+                    if st.button("Not now", key="dash_prop_cancel"):
                         st.session_state['pending_action'] = None
         with q3:
-            if not beginner_mode and st.button("Rebuild RAG", key="dash_rag"):
-                n = retrieval.build_indices(db)
-                st.info(f"Indexed {n} items.")
+            st.caption("3. Refresh the knowledge index (advanced)")
+            if not beginner_mode:
+                if st.button("Rebuild memory", key="dash_rag"):
+                    n = retrieval.build_indices(db)
+                    st.success(f"Indexed {n} notes and messages.")
+            else:
+                st.caption("Toggle off Beginner Mode in Settings to see this option.")
         with q4:
-            if not beginner_mode and st.button("Scriptify Last Bullets", key="dash_scriptify"):
+            st.caption("4. Turn the last plan into a script (advanced)")
+            if not beginner_mode and st.button("Draft last plan as script", key="dash_scriptify"):
                 with sqlite3.connect(cfg["db_path"]) as c:
                     row = c.execute(
                         "SELECT content FROM messages WHERE role='architect' ORDER BY id DESC LIMIT 1"
@@ -158,8 +178,8 @@ def render_home(cfg: dict, db: MemoryDB):
                     if not bullets:
                         st.warning("No bullets to scriptify.")
                     else:
-                        st.warning("This will write a script to disk (fs_write). Confirm to continue.")
-                        if st.button("Confirm Scriptify", key="dash_scriptify_confirm"):
+                        st.warning("This writes a shell script to disk. Approve it only if the plan looks right.")
+                        if st.button("Yes, create the script", key="dash_scriptify_confirm"):
                             path = scriptify.write_script(
                                 bullets,
                                 base_dir=os.path.join(
@@ -173,7 +193,8 @@ def render_home(cfg: dict, db: MemoryDB):
                                 )
                             st.success(f"Script saved at: {path}")
 
-        st.subheader("Latest Outputs")
+        st.subheader("Review the latest plan and script")
+        st.caption("Read the plan to see what Symbiont wants to do. The script shows the exact commands it would run once you approve.")
         lp, lps, lpt = _latest_artifact(cfg["db_path"], "plan")
         ls, lst = _latest_apply_script(cfg["db_path"])  # prefer apply scripts
         c1, c2 = st.columns(2)

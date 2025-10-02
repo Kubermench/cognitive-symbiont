@@ -9,7 +9,15 @@ This bundle includes RAG memory, a local-first LLM adapter, a Streamlit homebase
 - Autonomy mode: set `initiative.autonomy_mode` (`manual|guarded|full`) to control how Eternal cycles behave.
 - Proposals: generates a one-step plan and a non-executing apply script plus a rollback script (one per repo configured).
 
-### Quick Start
+### Quick Start (non-technical friendly)
+1. Open a terminal in the project folder and run `streamlit run app.py`.
+2. In the web app, click **Run a cycle**. Symbiont will write a short plan on the left and a matching script on the right.
+3. Read the plan. If it sounds good, press **Run safely (guarded)** → **Confirm**. Symbiont runs the script, saves the log, and shows a success message.
+4. Need a web reference? Use **Settings → Browser → Fetch to notes** and confirm; the note appears in “Sources” for the next plan.
+
+Symbiont never changes files until you press **Confirm**, and every action (plans, scripts, logs) is written under `data/artifacts/`.
+
+### Power Quick Start
 - In the UI sidebar, toggle Initiative → Enabled and set minutes, or run once via button “Propose Now (ignore watchers)”.
 - CLI: `python -m symbiont.cli initiative_once --force` to draft a proposal immediately.
 - Rollback: a `rollback_*.sh` script is saved next to `apply_*.sh`.
