@@ -14,5 +14,13 @@
     "details": {
       "strategy": "promote_diversity"
     }
+  },
+  "1759408632": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'No obvious quick refactors; run scan' repeated 3x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1759408632.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
   }
 }
