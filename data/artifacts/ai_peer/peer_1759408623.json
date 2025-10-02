@@ -1,0 +1,6 @@
+{
+  "prompt": "Rate this dev belief triple from 0-1 (float). Respond as JSON {score, justification}.\nTriple: {'subject': 'ruff', 'relation': 'preferred_over', 'object': 'black'}",
+  "response": "(offline-fallback) Unable to reach primary LLM. Prompt excerpt: You are an AI pair-programmer offering concise advice. Respond in under 120 words with numbered steps if actionable. Prompt: Rate this dev belief triple from 0-1 (float). Respond as JSON {score, justification}. Triple: {'subject': 'ruff', 'relation': 'preferred_over', 'object': 'black'}\n",
+  "simulated": true,
+  "timestamp": 1759408623
+}
