@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+mkdir -p sandbox/.state
 CAP=${SANDBOX_MAX_DEPLOYS_PER_DAY:-5}
 TODAY="sandbox/.state/deploys-$(date +%F)"
 count=0; [[ -f "$TODAY" ]] && count=$(cat "$TODAY")

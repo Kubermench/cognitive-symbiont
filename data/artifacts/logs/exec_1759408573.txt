@@ -1,0 +1,11 @@
+Requirement already satisfied: ruff in ./.venv/lib/python3.13/site-packages (0.13.1)
+Requirement already satisfied: pre-commit in ./.venv/lib/python3.13/site-packages (4.3.0)
+Requirement already satisfied: cfgv>=2.0.0 in ./.venv/lib/python3.13/site-packages (from pre-commit) (3.4.0)
+Requirement already satisfied: identify>=1.0.0 in ./.venv/lib/python3.13/site-packages (from pre-commit) (2.6.14)
+Requirement already satisfied: nodeenv>=0.11.1 in ./.venv/lib/python3.13/site-packages (from pre-commit) (1.9.1)
+Requirement already satisfied: pyyaml>=5.1 in ./.venv/lib/python3.13/site-packages (from pre-commit) (6.0.2)
+Requirement already satisfied: virtualenv>=20.10.0 in ./.venv/lib/python3.13/site-packages (from pre-commit) (20.34.0)
+Requirement already satisfied: distlib<1,>=0.3.7 in ./.venv/lib/python3.13/site-packages (from virtualenv>=20.10.0->pre-commit) (0.4.0)
+Requirement already satisfied: filelock<4,>=3.12.2 in ./.venv/lib/python3.13/site-packages (from virtualenv>=20.10.0->pre-commit) (3.19.1)
+Requirement already satisfied: platformdirs<5,>=3.9.1 in ./.venv/lib/python3.13/site-packages (from virtualenv>=20.10.0->pre-commit) (4.4.0)
+pre-commit installed at .git/hooks/pre-commit
