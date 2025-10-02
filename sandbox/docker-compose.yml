@@ -1,6 +1,8 @@
 services:
   sandbox-staging:
-    build: .
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile
     ports: ["8001:8000"]
     # Resource limits (compose may not enforce strictly; adjust as needed)
     deploy:

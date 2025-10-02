@@ -9,6 +9,7 @@ MODE="single"
 CYCLES=1
 AUTONOMY="guarded"
 SWARM=false
+ETERNAL_OVERRIDE=false
 THRESHOLD_GUARDED=0.5
 THRESHOLD_FULL=0.85
 
@@ -22,6 +23,7 @@ while [[ $# -gt 0 ]]; do
     --autonomy) AUTONOMY="$2"; shift ;;
     --swarm=*) SWARM="${1#*=}" ;;
     --swarm) SWARM="$2"; shift ;;
+    --eternal-override) ETERNAL_OVERRIDE=true ;;
     *) echo "[autopilot] unknown flag $1"; exit 2 ;;
   esac
   shift
@@ -101,9 +103,32 @@ PY
     break
   fi
 
+  CI_ENV=()
+  if [[ "$ETERNAL_OVERRIDE" == "true" ]]; then
+    override_allowed=$(ROGUE_SCORE="$rogue_score" python - <<'PY'
+import os
+score = float(os.environ.get("ROGUE_SCORE", "0"))
+print("ok" if score <= 0.5 else "skip")
+PY
+)
+    if [[ "$override_allowed" == "ok" ]]; then
+      echo "[autopilot] override active: lifting deploy cap"
+      CI_ENV+=(SANDBOX_MAX_DEPLOYS_PER_DAY=999999)
+    else
+      echo "[autopilot] override requested but rogue score high ($rogue_score); keeping default cap"
+    fi
+  fi
+
   if [ -x sandbox/scripts/ci.sh ]; then
     echo "[autopilot] run sandbox CI"
-    if ! (cd sandbox && ./scripts/ci.sh); then
+    if (( ${#CI_ENV[@]} )); then
+      CI_SUCCESS=0
+      (cd sandbox && "${CI_ENV[@]}" ./scripts/ci.sh) || CI_SUCCESS=$?
+    else
+      CI_SUCCESS=0
+      (cd sandbox && ./scripts/ci.sh) || CI_SUCCESS=$?
+    fi
+    if [[ $CI_SUCCESS -ne 0 ]]; then
       echo "[autopilot] sandbox CI failed; reverting"
       rollback_script="${latest_apply/apply_/rollback_}"
       if [[ -f "$rollback_script" ]]; then
@@ -118,6 +143,7 @@ PY
 
   if [[ "$SWARM" == "true" || "$SWARM" == "1" ]]; then
     python -m symbiont.cli swarm_evolve --auto --variants 3 || true
+    python -m symbiont.cli swarm_merge_transcripts || true
   fi
 
   if command -v git >/dev/null 2>&1; then

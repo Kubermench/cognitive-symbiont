@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +41,7 @@ class SwarmCoordinator:
         self.peer = AIPeerBridge(self.config)
         self.db = MemoryDB(db_path=self.config.get("db_path", "./data/symbiont.db"))
         ensure_dirs([self.repo_root / "data" / "artifacts" / "swarm"])
+        ensure_dirs([self.repo_root / "data" / "artifacts" / "ai_peer" / "processed"])
 
     # ------------------------------------------------------------------
     def after_cycle(self, cycle_result: Dict[str, Any]) -> Optional[List[SwarmVariant]]:
@@ -48,10 +51,20 @@ class SwarmCoordinator:
         if not last_action:
             return None
         belief_hint = f"Action: {last_action}"
-        return self.run(belief_hint, variants=self.variants, auto=True)
+        winners = self.run(belief_hint, variants=self.variants, auto=True, apply=True)
+        # Also merge any outstanding transcripts (e.g., from manual peer chats)
+        self.merge_from_transcripts()
+        return winners
 
     # ------------------------------------------------------------------
-    def run(self, belief_text: str, *, variants: int | None = None, auto: bool = False) -> List[SwarmVariant]:
+    def run(
+        self,
+        belief_text: str,
+        *,
+        variants: int | None = None,
+        auto: bool = False,
+        apply: bool = True,
+    ) -> List[SwarmVariant]:
         variants = variants or self.variants
         self.db.ensure_schema()
         seed = self._ensure_seed_triple(belief_text, auto)
@@ -61,7 +74,7 @@ class SwarmCoordinator:
         forks = self._fork_variants(seed, variants)
         scored = self._score_variants(forks)
         winners = self._merge_variants(scored)
-        if winners:
+        if winners and apply:
             self._apply_winners(winners, seed)
         return winners
 
@@ -139,6 +152,7 @@ class SwarmCoordinator:
                 score = 0.0
                 justification = transcript.response.strip()[:200]
             scored.append(SwarmVariant(triple=variant, score=max(0.0, min(score, 1.0)), justification=justification))
+            self._archive_transcript(Path(transcript.path))
         return scored
 
     def _merge_variants(self, scored: List[SwarmVariant]) -> List[SwarmVariant]:
@@ -231,3 +245,73 @@ class SwarmCoordinator:
                 + json.dumps(report["flags"], indent=2),
                 encoding="utf-8",
             )
+
+    # ------------------------------------------------------------------
+    def merge_from_transcripts(self) -> List[SwarmVariant]:
+        transcripts_dir = self.repo_root / "data" / "artifacts" / "ai_peer"
+        processed_dir = transcripts_dir / "processed"
+        ensure_dirs([processed_dir])
+
+        scored: List[SwarmVariant] = []
+        for path in sorted(transcripts_dir.glob("peer_*.json")):
+            if path.is_dir():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                self._archive_transcript(path)
+                continue
+
+            triple = self._parse_triple_from_prompt(payload.get("prompt", ""))
+            if not triple:
+                self._archive_transcript(path)
+                continue
+
+            try:
+                response_payload = json.loads(payload.get("response", ""))
+                score = float(response_payload.get("score", 0.0))
+                justification = str(response_payload.get("justification", ""))
+            except Exception:
+                score = 0.0
+                justification = payload.get("response", "")[:200]
+
+            scored.append(
+                SwarmVariant(
+                    triple={k: str(v).strip() for k, v in triple.items()},
+                    score=max(0.0, min(score, 1.0)),
+                    justification=justification,
+                )
+            )
+            self._archive_transcript(path)
+
+        winners = self._merge_variants(scored)
+        if winners:
+            self._apply_winners(winners, winners[0].triple)
+        return winners
+
+    # ------------------------------------------------------------------
+    def _archive_transcript(self, path: Path) -> None:
+        try:
+            processed_dir = path.parent / "processed"
+            ensure_dirs([processed_dir])
+            path.rename(processed_dir / path.name)
+        except Exception:
+            pass
+
+    def _parse_triple_from_prompt(self, prompt: str) -> Optional[Dict[str, str]]:
+        if not prompt:
+            return None
+        match = re.search(r"Triple:\s*(\{.*\})", prompt, re.DOTALL)
+        if not match:
+            return None
+        try:
+            data = ast.literal_eval(match.group(1))
+            if {"subject", "relation", "object"} <= data.keys():
+                return {
+                    "subject": str(data["subject"]).strip(),
+                    "relation": str(data["relation"]).strip(),
+                    "object": str(data["object"]).strip(),
+                }
+        except Exception:
+            return None
+        return None

@@ -1,0 +1,8 @@
+.git
+.venv
+__pycache__
+*.pyc
+sandbox/.pytest_cache
+sandbox/sandbox/.state
+data/artifacts/
+data/evolution/

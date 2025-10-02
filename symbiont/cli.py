@@ -392,7 +392,7 @@ def swarm_evolve(
     if not swarm.enabled:
         rprint("[yellow]Swarm evolution disabled (set evolution.swarm_enabled=true).")
         raise typer.Exit(1)
-    winners = swarm.run(belief or "", variants=variants, auto=auto)
+    winners = swarm.run(belief or "", variants=variants, auto=auto, apply=True)
     if not winners:
         rprint("[yellow]No swarm winners produced.")
         return
@@ -400,6 +400,54 @@ def swarm_evolve(
         triple = variant.triple
         rprint(
             f"[green]Winner:[/green] {triple['subject']} -> {triple['relation']} -> {triple['object']} (score {variant.score:.2f})"
+        )
+        if variant.justification:
+            rprint(f"  justification: {variant.justification}")
+
+
+@app.command()
+def swarm_propose(
+    belief: Optional[str] = typer.Argument(None, help="Belief triple or hint (e.g., 'subject->relation->object')."),
+    variants: int = typer.Option(3, "--variants", help="Number of swarm forks"),
+    config_path: str = "./configs/config.yaml",
+):
+    """Propose swarm variants without applying them."""
+
+    cfg = load_config(config_path)
+    swarm = SwarmCoordinator(cfg)
+    if not swarm.enabled:
+        rprint("[yellow]Swarm evolution disabled (set evolution.swarm_enabled=true).")
+        raise typer.Exit(1)
+    winners = swarm.run(belief or "", variants=variants, auto=False, apply=False)
+    if not winners:
+        rprint("[yellow]No swarm variants produced.")
+        return
+    for variant in winners:
+        triple = variant.triple
+        rprint(
+            f"[cyan]Proposal:[/cyan] {triple['subject']} -> {triple['relation']} -> {triple['object']} (score {variant.score:.2f})"
+        )
+        if variant.justification:
+            rprint(f"  justification: {variant.justification}")
+
+
+@app.command()
+def swarm_merge_transcripts(config_path: str = "./configs/config.yaml"):
+    """Merge outstanding AI peer transcripts into beliefs."""
+
+    cfg = load_config(config_path)
+    swarm = SwarmCoordinator(cfg)
+    if not swarm.enabled:
+        rprint("[yellow]Swarm evolution disabled (set evolution.swarm_enabled=true).")
+        raise typer.Exit(1)
+    winners = swarm.merge_from_transcripts()
+    if not winners:
+        rprint("[yellow]No new transcripts to merge.")
+        return
+    for variant in winners:
+        triple = variant.triple
+        rprint(
+            f"[green]Merged from transcripts:[/green] {triple['subject']} -> {triple['relation']} -> {triple['object']} (score {variant.score:.2f})"
         )
         if variant.justification:
             rprint(f"  justification: {variant.justification}")
