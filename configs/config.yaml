@@ -33,12 +33,19 @@ tools:
 llm:
   provider: ollama
   model: phi3:mini
+  mode: local  # local | cloud | hybrid
+  hybrid_threshold_tokens: 800
   cmd: ''
-  timeout_seconds: 25
+  timeout_seconds: 600
   fallback:
     provider: cmd
     cmd: "python scripts/offline_llm.py \"{prompt}\""
     timeout_seconds: 10
+  cloud:
+    provider: openai
+    model: gpt-4o-mini
+    api_key_env: OPENAI_API_KEY
+    timeout_seconds: 30
 ports:
   oracle:
     allowlist:

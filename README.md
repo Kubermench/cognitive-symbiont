@@ -22,6 +22,22 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
 - CLI: `python -m symbiont.cli initiative_once --force` to draft a proposal immediately.
 - Rollback: a `rollback_*.sh` script is saved next to `apply_*.sh`.
 
+### Hybrid LLM setup (optional)
+- Default mode is **local**: Symbiont calls Ollama (e.g., `phi3:mini`).
+- To enable cloud fallback, edit `configs/config.yaml`:
+  ```yaml
+  llm:
+    mode: hybrid          # local | cloud | hybrid
+    hybrid_threshold_tokens: 800
+    cloud:
+      provider: openai
+      model: gpt-4o-mini
+      api_key_env: OPENAI_API_KEY
+  ```
+- Export your API key (`export OPENAI_API_KEY=sk-…`). Prompts below the threshold run locally; longer ones automatically escalate to the cloud model and fall back to local if the cloud call fails.
+- **Crew orchestration (experimental)** – Define agents and crews in `configs/crews.yaml`. Run a crew with `python -m symbiont.cli crew_run quick_fix "Tidy the repo"`. Results land under `data/artifacts/crews/<crew>/crew_<timestamp>.json`; scripts still require approval via the guard dialogs.
+- **Graph workflows (experimental)** – Describe branching workflows in YAML (e.g., `configs/graphs/quick_fix.yaml`) and run them with `python -m symbiont.cli run_graph configs/graphs/quick_fix.yaml "Fix lint"`. If a run pauses, resume via `python -m symbiont.cli graph_resume data/evolution/graph_state_<ts>.json`.
+
 ## New Utilities (v3.5)
 - Guarded actions: UI and CLI confirmations for script writes and runs; actions recorded in `audits`.
 - Reflection + mutation: each cycle feeds `data/evolution/state.json`; `sym evolve_self --scope planner` queues guarded prompt tweaks (≤5% diff) saved under `data/artifacts/mutations/` after triple sandbox validation.

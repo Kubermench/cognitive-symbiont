@@ -7,12 +7,18 @@ from ..memory import retrieval
 import os, json, re
 
 class SubSelf(BaseAgent):
-    def __init__(self, role: Dict[str, Any], config: Dict[str, Any]):
+    def __init__(
+        self,
+        role: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        llm_client: LLMClient | None = None,
+    ):
         self.role = role
-        self.name = role.get("name","anon")
-        self.goal = role.get("goal","")
-        self.style = role.get("style","")
-        self.llm = LLMClient((config or {}).get("llm", {}))
+        self.name = role.get("name", "anon")
+        self.goal = role.get("goal", "")
+        self.style = role.get("style", "")
+        self.llm = llm_client or LLMClient((config or {}).get("llm", {}))
 
     def run(self, context: Dict[str, Any], memory) -> Dict[str, Any]:
         goal = context.get("goal","")
@@ -48,7 +54,21 @@ class SubSelf(BaseAgent):
         next_step = f"Apply 3 quick refactors: {', '.join([s['title'] for s in top[:3]])}" if top else "No obvious quick refactors; run scan"
         prompt = self._bullets_prompt(goal, top)
         llm_out = self.llm.generate(prompt) if prompt else ""
-        parsed = [ln[2:] for ln in llm_out.splitlines() if ln.strip().startswith('- ')] if llm_out else []
+        parsed: List[str] = []
+        if llm_out:
+            for ln in llm_out.splitlines():
+                line = ln.strip()
+                if not line:
+                    continue
+                if line.startswith("- "):
+                    parsed.append(line[2:])
+                    continue
+                # Accept numbered or bulleted variants (e.g., "1. ...", "1) ...", "* ...")
+                m = re.match(r"^(?:\d+[.\)]\s*|[•*]\s*)(.+)", line)
+                if m:
+                    parsed.append(m.group(1).strip())
+                    continue
+                parsed.append(line)
         bullets = (parsed or heur)[:3]
         if parsed:
             next_step = f"Apply 3 quick refactors: {', '.join([b.split(' — ',1)[0] for b in bullets])}"

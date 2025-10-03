@@ -1,0 +1,50 @@
+agents:
+  scout:
+    role: scout
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: local
+    cache: in_memory
+    tools: [repo_scan]
+  architect:
+    role: architect
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: local
+    cache: in_memory
+    tools: []
+  planner_cloud:
+    role: architect
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  critic:
+    role: critic
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: local
+    cache: in_memory
+    tools: []
+  executor:
+    role: executor
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: local
+    cache: in_memory
+    tools: [scriptify]
+
+crew:
+  quick_fix:
+    sequence:
+      - scout
+      - architect
+      - critic
+      - executor
