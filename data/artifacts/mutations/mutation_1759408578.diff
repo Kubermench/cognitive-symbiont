@@ -1,0 +1,15 @@
+--- a/symbiont/agents/subself.py
++++ b/symbiont/agents/subself.py
+@@ -33,7 +33,9 @@
+             hints.append(f"mem:{r['kind']}→{r['preview'][:100]} (score={r['score']:.2f})")
+         for m in memory.last_messages(limit=3):
+             hints.append(f"recent:{m['role']}→{m['content'][:80]}")
+-        hints.append("constraint: ≤60s, one-step action")
++        hints.append("constraint: ≤60s, one-step action
++        # evolution tweak
++        # signal: run repo scan if heuristics are empty")
+         hints.append(f"goal-seen: {goal[:120]}")
+         return hints
+ 
+
+# sandbox failure

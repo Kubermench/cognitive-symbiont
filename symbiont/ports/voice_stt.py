@@ -1,5 +1,9 @@
 from __future__ import annotations
-import subprocess, os
+
+import os
+import platform
+import shutil
+import subprocess
 from typing import Optional
 
 
@@ -28,5 +32,14 @@ def transcribe_wav(path: str) -> Optional[str]:
             return out.stdout
     except Exception:
         pass
+    # Try a lightweight Vosk-based CLI if available (community tool)
+    if platform.system() != "Darwin":
+        cli = shutil.which("vosk-transcriber")
+        if cli:
+            try:
+                out = subprocess.run([cli, path], capture_output=True, text=True)
+                if out.returncode == 0 and out.stdout:
+                    return out.stdout
+            except Exception:
+                pass
     return None
-

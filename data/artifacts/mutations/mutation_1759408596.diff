@@ -1,0 +1,9 @@
+--- a/symbiont/agents/subself.py
++++ b/symbiont/agents/subself.py
+@@ -68,4 +68,6 @@
+ - <Title> — <one-line details> (cmd: <one short shell command>)
+ 
+ Only bullets. No extra text.
++        # evolution tweak
++        # Always diversify suggestions across cycles; reference recent history to avoid repeats.
+ """

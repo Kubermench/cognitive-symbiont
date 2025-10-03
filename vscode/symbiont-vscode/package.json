@@ -2,9 +2,13 @@
   "name": "symbiont-vscode",
   "displayName": "Symbiont",
   "description": "Propose a tiny refactor from VS Code.",
-  "version": "0.0.1",
+  "version": "0.3.0",
   "engines": { "vscode": "^1.80.0" },
-  "activationEvents": ["onCommand:symbiont.proposeTinyRefactor"],
+  "activationEvents": [
+    "onCommand:symbiont.proposeTinyRefactor",
+    "onCommand:symbiont.runLatestScriptSafely",
+    "onCommand:symbiont.showProposalDiff"
+  ],
   "main": "out/extension.js",
   "contributes": {
     "commands": [
@@ -15,6 +19,10 @@
       {
         "command": "symbiont.runLatestScriptSafely",
         "title": "Symbiont: Run Latest Script Safely"
+      },
+      {
+        "command": "symbiont.showProposalDiff",
+        "title": "Symbiont: Show Proposal Diff"
       }
     ]
   },

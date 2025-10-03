@@ -1,0 +1,16 @@
+# Python caches
+__pycache__/
+*.pyc
+
+# Generated artifacts
+data/artifacts/
+data/evolution/
+sandbox/sandbox/.state/
+sandbox/.pytest_cache/
+
+# Local environments
+.venv/
+.DS_Store
+
+# Docker build output
+sandbox/app/__pycache__/

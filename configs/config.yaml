@@ -1,18 +1,73 @@
-db_path: "./data/symbiont.db"
-env: "dev"
+db_path: ./data/symbiont.db
+env: dev
 max_tokens: 6000
 cycle_budget_seconds: 60
-consensus: {min_agree: 2, require_critic_ok: true}
+consensus:
+  min_agree: 2
+  require_critic_ok: true
 initiative:
   enabled: false
-  repo_path: "."
-  watchers: ["file", "git", "timer"]
+  repo_path: .
+  watchers:
+  - file
+  - git
+  - timer
   idle_minutes: 120
   timer_minutes: 120
-  trigger_mode: "idle_and_timer"  # one of: any, idle_and_timer
-  goal_template: "Repo idle; propose one 10-minute refactor and draft a script."
-tools: {allow_code_runner: true, allow_files: true, network_access: false}
-llm: {provider: "none", model: "phi3:mini", cmd: "", timeout_seconds: 25}
-voice: {enabled: false, stt: "none", tts: "say", wake_word: "symbiont"}
-guard: {auto_approve_safe: false}
-browser: {enabled: false, allowlist: ["https://docs.astral.sh/ruff/"]}
+  trigger_mode: idle_and_timer
+  goal_template: Repo idle; propose one 10-minute refactor and draft a script.
+  watch_config_path: ./configs/watch_targets.yaml
+  autonomy_mode: guarded
+evolution:
+  enabled: true
+  repeat_threshold: 3
+  empty_bullet_threshold: 2
+  swarm_enabled: true
+  swarm_variants: 3
+  swarm_timeout: 20
+  swarm_max_delta: 0.05
+tools:
+  allow_code_runner: true
+  allow_files: true
+  network_access: true
+llm:
+  provider: ollama
+  model: phi3:mini
+  cmd: ''
+  timeout_seconds: 25
+  fallback:
+    provider: cmd
+    cmd: "python scripts/offline_llm.py \"{prompt}\""
+    timeout_seconds: 10
+ports:
+  oracle:
+    allowlist:
+    - docs.astral.sh
+    - python.langchain.com
+    max_queries: 5
+  ai_peer:
+    stub_mode: true
+  github:
+    repository: owner/repo
+    owner_allowlist:
+    - owner
+    token_path: ~/.symbiont/github.token
+voice:
+  enabled: false
+  stt: none
+  tts: say
+  wake_word: symbiont
+guard:
+  auto_approve_safe: false
+browser:
+  enabled: true
+  allowlist:
+  - https://docs.astral.sh/ruff/
+autopilot:
+  push_enabled: false
+  default_mode: single
+  default_cycles: 1
+  default_swarm: false
+ui:
+  confirm_intent: false
+  beginner_mode: true

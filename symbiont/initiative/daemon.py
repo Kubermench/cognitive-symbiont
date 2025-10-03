@@ -1,9 +1,10 @@
 from __future__ import annotations
 import os, time, json, subprocess
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Optional
 
 from ..orchestrator import Orchestrator
 from ..tools.files import ensure_dirs
+from .watchers import RepoWatchConfig, build_repo_watch_configs
 
 
 STATE_DIR = os.path.join("./data", "initiative")
@@ -18,9 +19,18 @@ def _now() -> int:
 def _load_state() -> Dict[str, Any]:
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            data.setdefault("targets", {})
+            return data
     except Exception:
-        return {"last_proposal_ts": 0, "last_check_ts": 0, "daemon_running": False, "daemon_started_ts": 0, "daemon_pid": 0}
+        return {
+            "last_proposal_ts": 0,
+            "last_check_ts": 0,
+            "daemon_running": False,
+            "daemon_started_ts": 0,
+            "daemon_pid": 0,
+            "targets": {},
+        }
 
 
 def _save_state(st: Dict[str, Any]):
@@ -91,76 +101,100 @@ def _latest_file_mtime(path: str) -> int:
     return latest
 
 
-def _should_trigger(cfg: Dict[str, Any]) -> Tuple[bool, List[str]]:
+def _should_trigger(cfg: Dict[str, Any]) -> Tuple[bool, List[str], Optional[RepoWatchConfig]]:
     ini = cfg.get("initiative", {})
     if not ini.get("enabled", False):
-        return False, ["initiative.disabled"]
-    repo_path = os.path.abspath(ini.get("repo_path", "."))
-    watchers: List[str] = ini.get("watchers", ["file", "git", "timer"]) or []
-    idle_minutes = int(ini.get("idle_minutes", 120))
-    timer_minutes = int(ini.get("timer_minutes", 120))
-    trigger_mode = ini.get("trigger_mode", "idle_and_timer")  # any | idle_and_timer
+        return False, ["initiative.disabled"], None
+
+    configs = build_repo_watch_configs(cfg)
+    if not configs:
+        return False, ["initiative.no_targets"], None
 
     state = _load_state()
     now = _now()
-    reasons: List[str] = []
 
-    idle_ok = False
-    timer_ok = False
+    for target in configs:
+        path = str(target.path)
+        target_state = state.setdefault("targets", {}).setdefault(path, {"last_proposal": 0, "last_check": 0})
+        reasons: List[str] = []
 
-    if "file" in watchers:
-        mtime = _latest_file_mtime(repo_path)
-        if mtime > 0 and (now - mtime) >= idle_minutes * 60:
-            idle_ok = True
-            reasons.append(f"file.idle>={idle_minutes}m")
+        idle_ok = False
+        timer_ok = False
 
-    if "git" in watchers:
-        if _is_git_repo(repo_path):
-            last = _git_last_commit_ts(repo_path)
-            dirty = _git_is_dirty(repo_path)
-            if last > 0 and (now - last) >= idle_minutes * 60 and not dirty:
+        target_state["last_check"] = now
+
+        if "file" in target.watchers:
+            mtime = _latest_file_mtime(path)
+            if mtime > 0 and (now - mtime) >= target.idle_minutes * 60:
                 idle_ok = True
-                reasons.append(f"git.idle>={idle_minutes}m")
+                reasons.append(f"file.idle>={target.idle_minutes}m")
 
-    if "timer" in watchers:
-        last_prop = int(state.get("last_proposal_ts", 0))
-        if (now - last_prop) >= timer_minutes * 60:
-            timer_ok = True
-            reasons.append(f"timer>={timer_minutes}m")
+        if "git" in target.watchers and _is_git_repo(path):
+            last = _git_last_commit_ts(path)
+            dirty = _git_is_dirty(path)
+            if last > 0 and (now - last) >= target.git_idle_minutes * 60 and not dirty:
+                idle_ok = True
+                reasons.append(f"git.idle>={target.git_idle_minutes}m")
 
-    if trigger_mode == "idle_and_timer":
-        ok = idle_ok and timer_ok
-    else:  # any
-        ok = idle_ok or timer_ok
+        if "timer" in target.watchers:
+            last_prop = int(target_state.get("last_proposal", 0))
+            if (now - last_prop) >= target.timer_minutes * 60:
+                timer_ok = True
+                reasons.append(f"timer>={target.timer_minutes}m")
 
-    return ok, reasons
+        if target.trigger_mode == "idle_and_timer":
+            ok = idle_ok and timer_ok
+        else:
+            ok = idle_ok or timer_ok
+
+        if ok:
+            _save_state(state)
+            return True, reasons, target
+
+    _save_state(state)
+    return False, ["no_target_ready"], None
 
 
-def propose_once(cfg: Dict[str, Any], reason: str = "watchers") -> Dict[str, Any]:
+def propose_once(cfg: Dict[str, Any], reason: str = "watchers", *, target: RepoWatchConfig | None = None) -> Dict[str, Any]:
     goal = cfg.get("initiative", {}).get(
         "goal_template",
         "Repo idle; propose one 10-minute refactor and draft a script.",
     )
-    goal = f"{goal} [trigger: {reason}]"
+    if target is not None:
+        goal = f"{goal} [repo:{target.path}] [trigger:{reason}]"
+    else:
+        goal = f"{goal} [trigger:{reason}]"
     orch = Orchestrator(cfg)
     res = orch.cycle(goal=goal)
     st = _load_state()
-    st["last_proposal_ts"] = _now()
-    st["last_check_ts"] = _now()
+    now = _now()
+    st["last_proposal_ts"] = now
+    st["last_check_ts"] = now
+    if target is not None:
+        path = str(target.path)
+        st.setdefault("targets", {}).setdefault(path, {"last_proposal": 0, "last_check": 0})
+        st["targets"][path]["last_proposal"] = now
+        st["targets"][path]["last_check"] = now
     _save_state(st)
     return res
 
 
-def run_once_if_triggered(cfg: Dict[str, Any]) -> Tuple[bool, List[str], Dict[str, Any] | None]:
-    ok, reasons = _should_trigger(cfg)
+def run_once_if_triggered(cfg: Dict[str, Any]) -> Tuple[bool, List[str], Dict[str, Any] | None, Optional[RepoWatchConfig]]:
+    ok, reasons, target = _should_trigger(cfg)
     if not ok:
-        return False, reasons, None
-    res = propose_once(cfg, reason=",".join(reasons))
+        return False, reasons, None, target
+    res = propose_once(cfg, reason=",".join(reasons), target=target)
     st = _load_state()
-    st["last_proposal_ts"] = _now()
-    st["last_check_ts"] = _now()
+    now = _now()
+    st["last_proposal_ts"] = now
+    st["last_check_ts"] = now
+    if target is not None:
+        path = str(target.path)
+        st.setdefault("targets", {}).setdefault(path, {"last_proposal": 0, "last_check": 0})
+        st["targets"][path]["last_proposal"] = now
+        st["targets"][path]["last_check"] = now
     _save_state(st)
-    return True, reasons, res
+    return True, reasons, res, target
 
 
 def daemon_loop(cfg: Dict[str, Any], poll_seconds: int = 60):
@@ -176,13 +210,14 @@ def daemon_loop(cfg: Dict[str, Any], poll_seconds: int = 60):
     _save_state(st)
     while True:
         try:
-            ok, reasons, _ = run_once_if_triggered(cfg)
+            ok, reasons, _, target = run_once_if_triggered(cfg)
             now = _now()
             st = _load_state()
             st["last_check_ts"] = now
             _save_state(st)
             if ok:
-                print("[initiative] proposed (reasons:", ",".join(reasons), ")")
+                repo_msg = f" repo={getattr(target, 'path', '?')}" if target else ""
+                print("[initiative] proposed (reasons:", ",".join(reasons), ")" + repo_msg)
             if is_stop_requested():
                 print("[initiative] stop requested; exiting daemon")
                 break

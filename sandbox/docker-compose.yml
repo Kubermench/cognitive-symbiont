@@ -1,0 +1,20 @@
+services:
+  sandbox-staging:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile
+    ports: ["8001:8000"]
+    # Resource limits (compose may not enforce strictly; adjust as needed)
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/healthz | grep -q ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
