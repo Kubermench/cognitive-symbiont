@@ -33,7 +33,7 @@ tools:
 llm:
   provider: ollama
   model: phi3:mini
-  mode: local  # local | cloud | hybrid
+  mode: hybrid  # local | cloud | hybrid
   hybrid_threshold_tokens: 800
   cmd: ''
   timeout_seconds: 600
@@ -45,6 +45,12 @@ llm:
     provider: openai
     model: gpt-4o-mini
     api_key_env: OPENAI_API_KEY
+    api_key_source:
+      - method: env
+        env: OPENAI_API_KEY
+      - method: env_file
+        path: .env
+        key: OPENAI_API_KEY
     timeout_seconds: 30
 ports:
   oracle:

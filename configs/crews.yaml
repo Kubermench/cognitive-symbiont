@@ -40,6 +40,31 @@ agents:
       mode: local
     cache: in_memory
     tools: [scriptify]
+  dynamics_scout:
+    role: dynamics_scout
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: local
+    cache: in_memory
+    tools: [repo_scan]
+  sd_modeler:
+    role: sd_modeler
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  strategist:
+    role: strategist
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: local
+    cache: in_memory
+    tools: []
 
 crew:
   quick_fix:
@@ -48,3 +73,9 @@ crew:
       - architect
       - critic
       - executor
+  foresight_sd:
+    sequence:
+      - dynamics_scout
+      - sd_modeler
+      - strategist
+      - critic

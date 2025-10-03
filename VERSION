@@ -1,3 +1,3 @@
-version: v2.3
-sha256: 7abb87ac35bd8a897f87594fad35767a5235be71a5a5cd2a19543721933dc6c2
-built_at_utc: 2025-09-05T08:01:39.415162
+version: v2.4
+sha256: development-local
+built_at_utc: 2025-09-15T00:00:00

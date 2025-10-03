@@ -135,6 +135,7 @@ class LLMClient:
                 provider=self.cloud_cfg.get("provider", "openai"),
                 model=self.cloud_cfg.get("model", "gpt-4o-mini"),
                 api_key_env=self.cloud_cfg.get("api_key_env", "OPENAI_API_KEY"),
+                api_key_source=self.cloud_cfg.get("api_key_source"),
                 timeout_seconds=int(self.cloud_cfg.get("timeout_seconds", 30)),
             )
             self._cloud_client = CloudLLMClient(config)

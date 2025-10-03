@@ -12,7 +12,8 @@ import yaml
 from ..agents.registry import AgentRegistry
 from ..agents.subself import SubSelf
 from ..memory.db import MemoryDB
-from ..tools import scriptify
+from ..tools import scriptify, sd_engine
+from .systems import governance_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class GraphSpec:
     start: str
     nodes: Dict[str, NodeSpec]
     crew_config: Path
+    simulation: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_yaml(cls, path: Path) -> "GraphSpec":
@@ -55,13 +57,20 @@ class GraphSpec:
             raise ValueError("Graph spec missing 'graph.start'")
         nodes_section = graph_data.get("nodes", {})
         nodes = {name: NodeSpec.from_dict(name, spec) for name, spec in nodes_section.items()}
-        crew_config = Path(data.get("crew_config", data.get("crews"))) if data else None
+        crew_config_value = data.get("crew_config") if data else None
+        if crew_config_value is None:
+            crew_config_value = data.get("crews") if data else None
+        crew_config = Path(crew_config_value).expanduser() if crew_config_value else None
         if not crew_config:
             raise ValueError("Graph spec missing 'crew_config' pointing to crews YAML")
-        crew_config = crew_config.expanduser().resolve()
+        if not crew_config.is_absolute():
+            crew_config = (path.parent / crew_config).resolve()
+        else:
+            crew_config = crew_config.resolve()
         if not crew_config.exists():
             raise ValueError(f"Crew config not found at {crew_config}")
-        return cls(start=start, nodes=nodes, crew_config=crew_config)
+        simulation = data.get("simulation") or None
+        return cls(start=start, nodes=nodes, crew_config=crew_config, simulation=simulation)
 
 
 class GraphRunner:
@@ -84,6 +93,8 @@ class GraphRunner:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.graph_artifacts = Path("data/artifacts/graphs")
         self.graph_artifacts.mkdir(parents=True, exist_ok=True)
+        self.simulation_dir = self.graph_artifacts / "simulations"
+        self.simulation_dir.mkdir(parents=True, exist_ok=True)
 
     def run(self, goal: str, resume_state: Optional[Path] = None) -> Path:
         if resume_state:
@@ -100,6 +111,29 @@ class GraphRunner:
         context = {"goal": goal, "episode_id": None, "cwd": Path.cwd()}
         self.db.ensure_schema()
         latest_bullets: Iterable[str] = []
+        if not resume_state and self.spec.simulation:
+            blueprint = self.spec.simulation.get("blueprint") or self._default_blueprint()
+            context["sd_blueprint"] = blueprint
+            try:
+                baseline = self._execute_simulation(
+                    blueprint,
+                    goal=goal,
+                    timestamp=timestamp,
+                    label="baseline",
+                    horizon=int(self.spec.simulation.get("horizon", 60)),
+                    noise=float(self.spec.simulation.get("noise", 0.0)),
+                )
+                context["sd_projection"] = baseline
+                context["sd_projection_summary"] = baseline.get("stats")
+                history.append(
+                    {
+                        "node": "simulation_baseline",
+                        "agent": "sd_engine",
+                        "result": self._compact_simulation(baseline),
+                    }
+                )
+            except Exception as exc:  # pragma: no cover - safety net
+                logger.warning("Baseline simulation failed: %s", exc)
 
         while current and current.upper() != "END":
             node = self.spec.nodes.get(current)
@@ -117,6 +151,30 @@ class GraphRunner:
                 "result": result,
             })
             self._save_state(state_path, goal, current, history, timestamp)
+
+            if agent_spec.role == "dynamics_scout" and isinstance(result, dict):
+                blueprint = result.get("sd_blueprint")
+                if blueprint:
+                    combined = self._merge_blueprints(context.get("sd_blueprint"), blueprint)
+                    context["sd_blueprint"] = combined
+            if agent_spec.role == "sd_modeler" and isinstance(result, dict):
+                blueprint = context.get("sd_blueprint") or self._default_blueprint()
+                horizon = int(result.get("horizon", self.spec.simulation.get("horizon", 60) if self.spec.simulation else 60))
+                noise = float(result.get("noise", self.spec.simulation.get("noise", 0.0) if self.spec.simulation else 0.0))
+                try:
+                    projection = self._execute_simulation(
+                        blueprint,
+                        goal=goal,
+                        timestamp=timestamp,
+                        label=node.name,
+                        horizon=horizon,
+                        noise=noise,
+                    )
+                    context["sd_projection"] = projection
+                    context["sd_projection_summary"] = projection.get("stats")
+                    history[-1]["simulation"] = self._compact_simulation(projection)
+                except Exception as exc:  # pragma: no cover - safety
+                    history[-1]["simulation_error"] = str(exc)
 
             outcome = self._classify_result(result)
             if agent_spec.role == "architect":
@@ -170,8 +228,115 @@ class GraphRunner:
             "timestamp": timestamp,
             "history": history,
         }
+        evo_cfg = self.cfg.get("evolution") if isinstance(self.cfg, dict) else None
+        snapshot = governance_snapshot(
+            history,
+            drift_rate=float((evo_cfg or {}).get("rogue_drift_rate", 0.05)),
+            horizon=int((evo_cfg or {}).get("rogue_forecast_horizon", 50)),
+            alert_threshold=float((evo_cfg or {}).get("rogue_alert_threshold", 0.6)),
+        )
+        if snapshot:
+            payload["governance"] = snapshot
+            if snapshot.get("alert"):
+                logger.warning(
+                    "Governance alert: rogue baseline %.2f exceeds threshold %.2f",
+                    snapshot["rogue_baseline"],
+                    snapshot["alert_threshold"],
+                )
         artifact_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return artifact_path
+
+    def _execute_simulation(
+        self,
+        blueprint: Dict[str, Any],
+        *,
+        goal: str,
+        timestamp: int,
+        label: str,
+        horizon: int,
+        noise: float,
+    ) -> Dict[str, Any]:
+        spec = sd_engine.build_spec(blueprint)
+        result = sd_engine.simulate(
+            spec,
+            horizon=horizon,
+            noise=noise,
+            artifacts_dir=self.simulation_dir,
+        )
+        plot_path = result.get("plot_path")
+        if plot_path:
+            try:
+                src = Path(plot_path)
+                if src.exists():
+                    dest = self.simulation_dir / f"simulation_{label}_{timestamp}.png"
+                    src.replace(dest)
+                    result["plot_path"] = str(dest)
+            except Exception:  # pragma: no cover - best effort
+                pass
+        payload = {
+            "goal": goal,
+            "label": label,
+            "timestamp": timestamp,
+            "blueprint": blueprint,
+            "result": result,
+        }
+        sim_path = self.simulation_dir / f"simulation_{label}_{timestamp}.json"
+        sim_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        add_run = getattr(self.db, "add_sd_run", None)
+        if callable(add_run):
+            try:
+                add_run(
+                    goal=goal,
+                    label=label,
+                    horizon=horizon,
+                    timestep=result.get("timestep", 1.0),
+                    stats=result.get("stats", {}),
+                    plot_path=result.get("plot_path"),
+                )
+            except Exception:  # pragma: no cover
+                logger.debug("Failed to persist sd_run telemetry", exc_info=True)
+        return result
+
+    def _compact_simulation(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "stats": result.get("stats"),
+            "plot_path": result.get("plot_path"),
+            "timestep": result.get("timestep"),
+        }
+
+    def _merge_blueprints(
+        self,
+        existing: Optional[Dict[str, Any]],
+        incoming: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not existing:
+            return incoming
+        merged = dict(existing)
+        for key in ("stocks", "flows", "auxiliaries"):
+            if key in incoming and incoming[key]:
+                merged[key] = incoming[key]
+        if incoming.get("parameters"):
+            params = dict(existing.get("parameters", {}))
+            params.update(incoming["parameters"])
+            merged["parameters"] = params
+        if "timestep" in incoming:
+            merged["timestep"] = incoming["timestep"]
+        return merged
+
+    def _default_blueprint(self) -> Dict[str, Any]:
+        return {
+            "timestep": 1.0,
+            "stocks": [
+                {"name": "autonomy", "initial": 0.5, "min": 0.0, "max": 1.0},
+                {"name": "rogue", "initial": 0.2, "min": 0.0, "max": 1.0},
+            ],
+            "flows": [
+                {"name": "autonomy_gain", "target": "autonomy", "expression": "0.1 * (1 - rogue)"},
+                {"name": "rogue_decay", "target": "rogue", "expression": "-0.05 * autonomy"},
+            ],
+            "auxiliaries": [],
+            "parameters": {},
+        }
 
     def _save_state(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os, json, sqlite3, time, threading
+from pathlib import Path
 import streamlit as st
 from symbiont.memory.db import MemoryDB
 from symbiont.memory import retrieval
@@ -35,6 +36,68 @@ def _latest_apply_script(db_path: str):
             "SELECT path, created_at FROM artifacts WHERE type='script' AND path LIKE '%apply_%' ORDER BY id DESC LIMIT 1"
         ).fetchone()
     return (row[0], row[1]) if row else (None, None)
+
+
+def _latest_governance_snapshot(db_path: str):
+    graphs_dir = Path(db_path).resolve().parent / "artifacts" / "graphs"
+    if not graphs_dir.exists():
+        return None
+    graph_files = sorted(
+        (p for p in graphs_dir.glob("graph_*.json") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for path in graph_files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        snapshot = data.get("governance")
+        if snapshot:
+            return path, snapshot
+    return None
+
+
+def _latest_simulation(db_path: str):
+    sim_dir = Path(db_path).resolve().parent / "artifacts" / "graphs" / "simulations"
+    if not sim_dir.exists():
+        return None
+    sim_files = sorted(
+        (p for p in sim_dir.glob("simulation_*.json") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for path in sim_files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("result", {}).get("stats"):
+            return path, data
+    return None
+
+
+def _sd_runs_history(db_path: str, limit: int = 5):
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT goal, label, horizon, timestep, stats_json, plot_path, created_at "
+                "FROM sd_runs ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    except Exception:
+        return []
+    history = []
+    for row in rows:
+        try:
+            stats = json.loads(row["stats_json"] or "{}")
+        except json.JSONDecodeError:
+            stats = {}
+        record = dict(row)
+        record["stats"] = stats
+        history.append(record)
+    return history
 
 
 def render_home(cfg: dict, db: MemoryDB):
@@ -77,6 +140,58 @@ def render_home(cfg: dict, db: MemoryDB):
                 ce = c.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
                 ca = c.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
             st.markdown(f"**Memory**: episodes={ce} · artifacts={ca}")
+
+        governance_data = _latest_governance_snapshot(cfg["db_path"])
+        if governance_data:
+            graph_path, snapshot = governance_data
+            st.subheader("Governance forecast")
+            st.caption(
+                f"Baseline rogue score {snapshot['rogue_baseline']:.2f}; forecasting {len(snapshot['rogue_forecast'])} future cycles from {graph_path.name}."
+            )
+            if snapshot.get("alert"):
+                st.warning(
+                    f"Rogue score exceeds {snapshot['alert_threshold']:.2f}. Review guards before approving further automation."
+                )
+            st.line_chart(snapshot["rogue_forecast"])
+
+        sim_data = _latest_simulation(cfg["db_path"])
+        if sim_data:
+            sim_path, payload = sim_data
+            result = payload.get("result", {})
+            stats = result.get("stats", {})
+            st.subheader("System dynamics preview")
+            st.caption(
+                f"Latest projection '{payload.get('label', 'baseline')}' captured in {sim_path.name}; horizon {len(result.get('trajectory', []))} steps."
+            )
+            cols = st.columns(2)
+            with cols[0]:
+                st.json(stats)
+            plot_path = result.get("plot_path")
+            if plot_path and Path(plot_path).exists():
+                with cols[1]:
+                    st.image(str(plot_path), caption="SD projection", use_column_width=True)
+
+        history = _sd_runs_history(cfg["db_path"], limit=5)
+        if history:
+            with st.expander("Recent SD runs", expanded=False):
+                for record in history:
+                    ts = record.get("created_at") or 0
+                    when = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ts)) if ts else "—"
+                    stats = record.get("stats", {})
+                    headline = []
+                    for key in ("rogue", "autonomy", "latency"):
+                        if key in stats and isinstance(stats[key], dict):
+                            last_value = stats[key].get("last")
+                            if isinstance(last_value, (int, float)):
+                                headline.append(f"{key}={last_value:.2f}")
+                    st.markdown(
+                        f"**{record['goal']}** — {record['label']} (h={record['horizon']}, dt={record['timestep']:.2f})"
+                        f"<br/>`{when} UTC`<br/>Stats: {', '.join(headline) if headline else '(none)' }",
+                        unsafe_allow_html=True,
+                    )
+                    if record.get("plot_path") and Path(record["plot_path"]).exists():
+                        st.caption(f"plot: {record['plot_path']}")
+                    st.markdown("---")
 
         st.subheader("Take an action")
         st.caption("Choose what you need right now. Symbiont handles the technical work and keeps a full paper trail.")

@@ -1,0 +1,14 @@
+crew_name: dynamics_weaver
+description: Hybrid SD + ABM foresight crew.
+roles:
+  - name: dw_scout
+    description: Map SD stocks/flows and agent noise parameters.
+  - name: dw_sd_macro
+    description: Run macro SD simulation against the provided blueprint.
+  - name: dw_abm
+    description: Inject agent-based noise and analyse variance.
+  - name: dw_strategist
+    description: Recommend interventions based on the combined outputs.
+artifacts:
+  - type: json
+    path: data/artifacts/crews/dynamics_weaver

@@ -1,4 +1,5 @@
 import os, json, typer, yaml, sqlite3, time, stat
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from rich import print as rprint
@@ -11,6 +12,7 @@ from .initiative import daemon as initiative
 from .agents.mutation import MutationEngine, MutationIntent
 from .agents.registry import AgentRegistry, CrewRunner
 from .orchestration.graph import GraphSpec, GraphRunner
+from .orchestration.dynamics_weaver import run_dynamics_weaver
 from .agents.swarm import SwarmCoordinator
 from . import guards as guard_mod
 from .ports.oracle import QueryOracle
@@ -482,6 +484,23 @@ def crew_run(
 
 
 @app.command()
+def dynamics_weaver(
+    goal: str,
+    config_path: str = "./configs/config.yaml",
+):
+    """Run the hybrid System Dynamics + ABM "Dynamics Weaver" foresight crew."""
+
+    cfg = load_config(config_path)
+    result = run_dynamics_weaver(goal, cfg)
+    rprint("[green]Dynamics Weaver completed.[/green]")
+    rprint(f"  goal: {result.goal}")
+    rprint(f"  risk_score: {result.risk_score:.3f}")
+    rprint(f"  artifact: {result.artifact_path}")
+    rprint(f"  sd_plot: {result.sd_results.get('plot_path')}")
+    rprint(f"  abm_plot: {result.abm_results.get('plot_path')}")
+
+
+@app.command()
 def run_graph(
     graph: str,
     goal: str = typer.Argument(..., help="Goal for the workflow"),
@@ -566,6 +585,61 @@ def graph_resume(
     runner = GraphRunner(spec, registry, cfg, db, graph_path=graph_path)
     artifact = runner.run(goal, resume_state=state_path)
     rprint(f"[green]Graph resumed.[/green] Transcript: {artifact}")
+
+
+@app.command()
+def sd_runs(
+    limit: int = typer.Option(5, "--limit", help="Number of recent SD runs to display"),
+    goal: Optional[str] = typer.Option(None, "--goal", help="Filter results by goal substring"),
+    config_path: str = "./configs/config.yaml",
+):
+    """Show recent system-dynamics simulations recorded in telemetry."""
+
+    cfg = load_config(config_path)
+    db_path = cfg["db_path"]
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        if goal:
+            rows = conn.execute(
+                "SELECT goal, label, horizon, timestep, stats_json, plot_path, created_at "
+                "FROM sd_runs WHERE goal LIKE ? ORDER BY id DESC LIMIT ?",
+                (f"%{goal}%", limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT goal, label, horizon, timestep, stats_json, plot_path, created_at "
+                "FROM sd_runs ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+
+    if not rows:
+        rprint("[yellow]No system-dynamics runs recorded yet.[/yellow]")
+        raise typer.Exit()
+
+    for row in rows:
+        stats = {}
+        try:
+            stats = json.loads(row["stats_json"] or "{}")
+        except json.JSONDecodeError:
+            stats = {}
+        headline = []
+        for key in ("rogue", "autonomy", "latency"):
+            if key in stats and isinstance(stats[key], dict):
+                last_value = stats[key].get("last")
+                if isinstance(last_value, (int, float)):
+                    headline.append(f"{key}={last_value:.2f}")
+        created_at = row["created_at"] or 0
+        if created_at:
+            created_dt = datetime.fromtimestamp(created_at, timezone.utc)
+            created_label = created_dt.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            created_label = "—"
+        rprint(
+            f"[bold]{row['goal']}[/bold]\n"
+            f"  label={row['label']} horizon={row['horizon']} timestep={row['timestep']:.2f} at {created_label} UTC\n"
+            f"  plot={row['plot_path'] or '(none)'}\n"
+            f"  stats: {', '.join(headline) if headline else '(none)'}"
+        )
 
 
 @app.command()

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
+
+from ..tools.secrets import SecretLoadError, load_secret
 
 
 class CloudLLMError(RuntimeError):
@@ -14,6 +16,7 @@ class CloudLLMConfig:
     provider: str
     model: str
     api_key_env: Optional[str] = None
+    api_key_source: Optional[Any] = None
     timeout_seconds: int = 30
 
 
@@ -38,14 +41,21 @@ class CloudLLMClient:
             from openai import OpenAI
         except ImportError as exc:
             raise CloudLLMError(
-                "openai package not installed. Install with `pip install openai`."
+                "openai package not installed. Install with `pip install openai` or `pip install -r requirements-dev.txt`."
             ) from exc
 
         api_key_env = self.cfg.api_key_env or "OPENAI_API_KEY"
-        api_key = os.getenv(api_key_env)
+        api_key = None
+        if self.cfg.api_key_source:
+            try:
+                api_key = load_secret(self.cfg.api_key_source, fallback_env=api_key_env)
+            except SecretLoadError as exc:
+                raise CloudLLMError(str(exc)) from exc
+        if not api_key:
+            api_key = os.getenv(api_key_env)
         if not api_key:
             raise CloudLLMError(
-                f"Environment variable {api_key_env} not set for OpenAI access."
+                f"OpenAI API key not available; set {api_key_env} or configure api_key_source"
             )
         self._openai_client = OpenAI(api_key=api_key)
 
@@ -71,4 +81,3 @@ class CloudLLMClient:
             return response.choices[0].message.content or ""
         except Exception as exc:
             raise CloudLLMError(f"Malformed OpenAI response: {exc}") from exc
-

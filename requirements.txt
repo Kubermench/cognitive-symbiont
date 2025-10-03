@@ -11,3 +11,5 @@ pyttsx3==2.90
 networkx==3.3
 requests==2.32.3
 PyGithub==2.4.0
+pytest==8.3.2
+pytest-cov==5.0.0

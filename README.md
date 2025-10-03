@@ -52,6 +52,8 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
 - AI peer bridge: `sym peer_chat --prompt "Summarise migration risks"` simulates external conversations (stubbed unless configured).
 - GitHub guard: `sym github_pr --title "Symbiont autopilot" --dry-run false` opens PRs under allowlisted owners using PyGitHub and stored tokens.
 - MCP server (minimal) + CLI `install-hooks` for RAG automation.
+- **System dynamics foresight (v4.1)**: run `python -m symbiont.cli run_graph configs/graphs/foresight_sd.yaml "Stress-test autonomy guard"` to trigger the new `dynamics_scout → sd_modeler → strategist` crew. A baseline simulation is recorded under `data/artifacts/graphs/simulations/`, plotted, and summarised in the BigKit governance dashboard (look for **Recent SD runs**) so you can inspect autonomy/rogue trajectories before executing scripts. Telemetry for each projection also lands in the SQLite `sd_runs` table; inspect it via `python -m symbiont.cli sd-runs --limit 3`.
+- **Dynamics Weaver (hybrid SD+ABM)**: `python -m symbiont.cli dynamics-weaver "Model rogue drift in swarm"` runs the new hybrid crew that couples the macro SD engine with an agent-based noise layer. Results (plots + JSON) live under `data/artifacts/crews/dynamics_weaver/` and the summary appears both in the CLI output and the SD telemetry tables.
 
 ### Commands
 - Graph claims:
