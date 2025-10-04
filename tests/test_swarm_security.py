@@ -26,7 +26,13 @@ def test_swarm_score_variants_assigns_agent_ids(tmp_path, monkeypatch):
 
     captured = []
 
-    def fake_chat(prompt: str, simulate_only: bool = False, agent_id: str | None = None):
+    def fake_chat(
+        prompt: str,
+        *,
+        simulate_only: bool = False,
+        agent_id: str | None = None,
+        budget=None,
+    ):
         captured.append(agent_id)
         payload = {"score": 0.9, "justification": "ok"}
         path = transcript_dir / f"peer_{agent_id}.json"

@@ -130,6 +130,8 @@ graph:
     data = json.loads(state_path.read_text())
     assert data["awaiting_human"] is True
     assert data["current_node"] == "n2"
+    assert "token_budget" in data
+    assert data["token_budget"]["used"] >= 0
 
     # Simulate human editing architect verdict to block, forcing END
     data["history"][-1]["result"]["verdict"] = "block"
@@ -141,6 +143,158 @@ graph:
     assert resumed.exists()
     final_state = json.loads(state_path.read_text())
     assert final_state.get("awaiting_human") is False
+
+
+def test_parallel_group_runs_all_nodes_before_advancing(tmp_path, monkeypatch):
+    crews_yaml = tmp_path / "crews.yaml"
+    crews_yaml.write_text(
+        """
+agents:
+  scout_agent:
+    role: scout
+    llm: {}
+    cache: in_memory
+    tools: []
+  research_agent:
+    role: researcher
+    llm: {}
+    cache: in_memory
+    tools: []
+  critic_agent:
+    role: critic
+    llm: {}
+    cache: in_memory
+    tools: []
+crew:
+  default:
+    sequence:
+      - scout_agent
+      - research_agent
+      - critic_agent
+""",
+        encoding="utf-8",
+    )
+
+    graph_yaml = tmp_path / "graph.yaml"
+    graph_yaml.write_text(
+        """
+crew_config: crews.yaml
+
+graph:
+  start: scout
+  parallel:
+    - [scout, research]
+  nodes:
+    scout:
+      agent: scout_agent
+    research:
+      agent: research_agent
+      on_success: critic
+    critic:
+      agent: critic_agent
+      next: END
+""",
+        encoding="utf-8",
+    )
+
+    spec = GraphSpec.from_yaml(graph_yaml)
+    registry = AgentRegistry.from_yaml(crews_yaml)
+    cfg = {"db_path": str(tmp_path / "sym.db")}
+    db = MemoryDB(cfg["db_path"])
+    db.ensure_schema()
+    runner = GraphRunner(spec, registry, cfg, db, graph_path=graph_yaml)
+
+    calls: list[str] = []
+
+    def fake_run(self, context, memory):
+        calls.append(self.name)
+        return {"verdict": "ok"}
+
+    monkeypatch.setattr("symbiont.agents.subself.SubSelf.run", fake_run)
+
+    artifact = runner.run("Parallel goal")
+    data = json.loads(artifact.read_text())
+    nodes = [entry["node"] for entry in data["history"]]
+    assert nodes[:3] == ["scout", "research", "critic"]
+    assert calls == ["scout", "researcher", "critic"]
+
+
+def test_parallel_group_early_exit_on_failure(tmp_path, monkeypatch):
+    crews_yaml = tmp_path / "crews.yaml"
+    crews_yaml.write_text(
+        """
+agents:
+  scout_agent:
+    role: scout
+    llm: {}
+    cache: in_memory
+    tools: []
+  research_agent:
+    role: researcher
+    llm: {}
+    cache: in_memory
+    tools: []
+  recovery_agent:
+    role: recovery
+    llm: {}
+    cache: in_memory
+    tools: []
+crew:
+  default:
+    sequence:
+      - scout_agent
+      - research_agent
+      - recovery_agent
+""",
+        encoding="utf-8",
+    )
+
+    graph_yaml = tmp_path / "graph.yaml"
+    graph_yaml.write_text(
+        """
+crew_config: crews.yaml
+
+graph:
+  start: scout
+  parallel:
+    - [scout, research]
+  nodes:
+    scout:
+      agent: scout_agent
+      on_failure: recovery
+    research:
+      agent: research_agent
+    recovery:
+      agent: recovery_agent
+      next: END
+""",
+        encoding="utf-8",
+    )
+
+    spec = GraphSpec.from_yaml(graph_yaml)
+    registry = AgentRegistry.from_yaml(crews_yaml)
+    cfg = {"db_path": str(tmp_path / "sym.db")}
+    db = MemoryDB(cfg["db_path"])
+    db.ensure_schema()
+    runner = GraphRunner(spec, registry, cfg, db, graph_path=graph_yaml)
+
+    calls: list[str] = []
+
+    def fake_run(self, context, memory):
+        calls.append(self.name)
+        if self.name == "scout":
+            return {"error": "boom"}
+        return {"verdict": "ok"}
+
+    monkeypatch.setattr("symbiont.agents.subself.SubSelf.run", fake_run)
+
+    artifact = runner.run("Parallel failure")
+    data = json.loads(artifact.read_text())
+    nodes = [entry["node"] for entry in data["history"]]
+    assert nodes == ["scout", "recovery"]
+    assert calls == ["scout", "recovery"]
+    key = runner._group_key(["scout", "research"])
+    assert runner.parallel_progress[key] == 0
 
 
 def test_graph_runner_runs_simulation_for_sd_modeler(tmp_path):

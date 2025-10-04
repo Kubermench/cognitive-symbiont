@@ -11,6 +11,7 @@ import yaml
 
 from .subself import SubSelf
 from ..llm.client import LLMClient
+from ..llm.budget import TokenBudget
 from ..memory.db import MemoryDB
 from ..tools import scriptify
 
@@ -83,13 +84,13 @@ class CachedLLMClient:
         logger.warning("Unknown cache backend %s; using in-memory", cache_cfg)
         return InMemoryCache()
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, **kwargs) -> str:
         key_src = f"{self.agent_id}:{prompt}".encode("utf-8")
         cache_key = hashlib.sha256(key_src).hexdigest()
         cached = self.cache.get(cache_key)
         if cached is not None:
             return cached
-        response = self.client.generate(prompt)
+        response = self.client.generate(prompt, **kwargs)
         if response:
             self.cache.set(cache_key, response)
         return response
@@ -168,11 +169,29 @@ class CrewRunner:
         outputs = []
         latest_bullets: list[str] = []
 
+        limit = 0
+        try:
+            limit = int(self.cfg.get("max_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        data_root = Path(
+            self.cfg.get("data_root")
+            or Path(self.cfg.get("db_path", "./data/symbiont.db")).parent
+        )
+        sink_path = data_root / "token_budget" / f"crew_{crew_name}.json"
+        budget = TokenBudget(limit=limit, label=f"crew:{crew_name}", sink_path=sink_path)
+        context["token_budget"] = budget
+
         for agent_id in crew.sequence:
             agent_spec = self.registry.get_agent(agent_id)
             llm_client = agent_spec.create_llm_client()
             role_dict = {"name": agent_spec.role}
-            agent = SubSelf(role_dict, self.cfg, llm_client=llm_client)
+            agent = SubSelf(
+                role_dict,
+                self.cfg,
+                llm_client=llm_client,
+                token_budget=budget,
+            )
             result = agent.run(context, memory_conn)
             outputs.append({"agent": agent_id, "result": result})
             if agent_spec.role == "architect":
@@ -204,4 +223,3 @@ class CrewRunner:
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path
-

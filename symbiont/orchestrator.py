@@ -1,11 +1,13 @@
 from __future__ import annotations
 import os, json, time
+from pathlib import Path
 from typing import List, Dict, Any
 from rich import print as rprint
 from .memory.db import MemoryDB
 from .memory import retrieval
 from .memory import graphrag
 from .agents.subself import SubSelf
+from .llm.budget import TokenBudget
 from .agents.reflector import CycleReflector
 from .agents.swarm import SwarmCoordinator
 from .tools.files import ensure_dirs
@@ -18,7 +20,6 @@ class Orchestrator:
         self.db = MemoryDB(db_path=config["db_path"])
         with open(os.path.join(os.path.dirname(__file__),'roles','roles.yaml'),'r',encoding='utf-8') as f:
             import yaml; self.roles = yaml.safe_load(f).get('roles', [])
-        self.subselves = [SubSelf(role=r, config=config) for r in self.roles]
         ensure_dirs([os.path.dirname(config['db_path'] or './data/symbiont.db')])
         self.reflector = CycleReflector(config)
         swarm_candidate = SwarmCoordinator(config)
@@ -29,8 +30,22 @@ class Orchestrator:
         retrieval.build_indices(self.db, limit_if_new=256)
         eid = self.db.start_episode(title=f"Goal: {goal}")
         ctx = {"goal": goal, "episode_id": eid, "cwd": os.getcwd()}
+        limit = 0
+        try:
+            limit = int(self.config.get("max_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        data_root = Path(
+            self.config.get("data_root")
+            or Path(self.config.get("db_path", "./data/symbiont.db")).parent
+        )
+        sink_path = data_root / "token_budget" / f"cycle_{eid}.json"
+        budget = TokenBudget(limit=limit, label=f"cycle:{eid}", sink_path=sink_path)
+        ctx["token_budget"] = budget
+        subselves = [SubSelf(role=r, config=self.config, token_budget=budget) for r in self.roles]
+
         trace = []
-        for sub in self.subselves:
+        for sub in subselves:
             out = sub.run(context=ctx, memory=self.db)
             trace.append({"role": sub.name, "output": out})
             self.db.add_message(role=sub.name, content=json.dumps(out))
@@ -52,7 +67,7 @@ class Orchestrator:
             rprint(f"[yellow]Reflection skipped:[/yellow] {exc}")
         if self.swarm:
             try:
-                self.swarm.after_cycle(result)
+                self.swarm.after_cycle(result, budget=budget)
             except Exception as exc:  # pragma: no cover
                 rprint(f"[yellow]Swarm evolution skipped:[/yellow] {exc}")
         rprint("[bold green]Consensus Action:[/bold green]", decision["action"], "\n[dim]Saved:", plan)

@@ -25,13 +25,21 @@ def test_swarm_run_merges_best_variants(monkeypatch, swarm_cfg):
     coordinator = SwarmCoordinator(swarm_cfg)
 
     seed = {"subject": "repo", "relation": "needs", "object": "linting"}
-    monkeypatch.setattr(coordinator, "_ensure_seed_triple", lambda text, auto: seed)
+    monkeypatch.setattr(
+        coordinator,
+        "_ensure_seed_triple",
+        lambda text, auto, budget=None: seed,
+    )
     v1 = seed
     v2 = {"subject": "repo", "relation": "needs", "object": "type hints"}
     v3 = {"subject": "docs", "relation": "require", "object": "refresh"}
     v4 = {"subject": "ci", "relation": "adds", "object": "coverage"}
 
-    monkeypatch.setattr(coordinator, "_fork_variants", lambda seed, n: [v1, v2, v3, v4])
+    monkeypatch.setattr(
+        coordinator,
+        "_fork_variants",
+        lambda seed, n, budget=None: [v1, v2, v3, v4],
+    )
 
     scored = [
         SwarmVariant(triple=v1, score=0.92, justification="top", agent_id="a1"),
@@ -39,11 +47,15 @@ def test_swarm_run_merges_best_variants(monkeypatch, swarm_cfg):
         SwarmVariant(triple=v3, score=0.58, justification="below threshold", agent_id="a3"),
         SwarmVariant(triple=v4, score=0.81, justification="second winner", agent_id="a4"),
     ]
-    monkeypatch.setattr(coordinator, "_score_variants", lambda variants: scored)
+    monkeypatch.setattr(
+        coordinator,
+        "_score_variants",
+        lambda variants, budget=None: scored,
+    )
 
     applied = []
 
-    def capture_apply(winners, _seed):
+    def capture_apply(winners, _seed, budget=None):
         applied.extend(winners)
 
     monkeypatch.setattr(coordinator, "_apply_winners", capture_apply)
@@ -58,7 +70,11 @@ def test_swarm_run_merges_best_variants(monkeypatch, swarm_cfg):
 
 def test_swarm_run_handles_missing_seed(monkeypatch, swarm_cfg):
     coordinator = SwarmCoordinator(swarm_cfg)
-    monkeypatch.setattr(coordinator, "_ensure_seed_triple", lambda text, auto: None)
+    monkeypatch.setattr(
+        coordinator,
+        "_ensure_seed_triple",
+        lambda text, auto, budget=None: None,
+    )
     winners = coordinator.run("belief: missing -> triple -> data", apply=False)
     assert winners == []
 
@@ -146,7 +162,7 @@ def test_ensure_seed_triple_parses_variants(swarm_cfg):
 
     # JSON fallback
     prompt = '{"subject": "docs", "relation": "updates", "object": "tutorial"}'
-    coordinator.llm.generate = lambda _: prompt
+    coordinator.llm.generate = lambda *args, **kwargs: prompt
     triple = coordinator._ensure_seed_triple("Describe", auto=False)
     assert triple == {"subject": "docs", "relation": "updates", "object": "tutorial"}
 
@@ -170,7 +186,7 @@ def test_ensure_seed_triple_auto_fetches_latest(swarm_cfg):
 
 def test_fork_variants_handles_invalid_json(monkeypatch, swarm_cfg):
     coordinator = SwarmCoordinator(swarm_cfg)
-    coordinator.llm.generate = lambda _: "not-json"
+    coordinator.llm.generate = lambda *args, **kwargs: "not-json"
     seed = {"subject": "repo", "relation": "needs", "object": "lint"}
     variants = coordinator._fork_variants(seed, 3)
     assert variants == [seed]
@@ -182,7 +198,7 @@ def test_fork_variants_parses_json(monkeypatch, swarm_cfg):
         {"subject": "repo", "relation": "needs", "object": "lint"},
         {"subject": "docs", "relation": "needs", "object": "refresh"},
     ])
-    coordinator.llm.generate = lambda _: payload
+    coordinator.llm.generate = lambda *args, **kwargs: payload
     seed = {"subject": "repo", "relation": "needs", "object": "lint"}
     result = coordinator._fork_variants(seed, 2)
     assert result[1]["subject"] == "docs"
@@ -191,7 +207,7 @@ def test_fork_variants_parses_json(monkeypatch, swarm_cfg):
 def test_score_variants_handles_bad_payload(monkeypatch, swarm_cfg):
     coordinator = SwarmCoordinator(swarm_cfg)
 
-    def fake_chat(prompt, simulate_only=False, agent_id=None):
+    def fake_chat(prompt, *, simulate_only=False, agent_id=None, budget=None):
         class Dummy:
             response = "not-json"
             path = str(Path(coordinator.repo_root) / "data" / "artifacts" / "ai_peer" / "peer_test.json")

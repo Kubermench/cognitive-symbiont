@@ -4,12 +4,13 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
 
 from ..llm.client import LLMClient
+from ..llm.budget import TokenBudget
 from ..memory.db import MemoryDB
 from ..memory import graphrag
 from ..tools.files import ensure_dirs
@@ -37,13 +38,19 @@ class QueryOracle:
         ensure_dirs([self.notes_dir])
 
     # ------------------------------------------------------------------
-    def run(self, prompt: str, limit: int | None = None) -> List[OracleResult]:
+    def run(
+        self,
+        prompt: str,
+        limit: int | None = None,
+        *,
+        budget: Optional[TokenBudget] = None,
+    ) -> List[OracleResult]:
         limit = min(limit or self.max_queries, self.max_queries)
         self.db.ensure_schema()
-        queries = self._plan_queries(prompt)
+        queries = self._plan_queries(prompt, budget=budget)
         results: List[OracleResult] = []
         for query in queries[:limit]:
-            url = self._choose_url(query)
+            url = self._choose_url(query, budget=budget)
             if not url:
                 continue
             if not self._is_allowed(url):
@@ -52,7 +59,7 @@ class QueryOracle:
             if not content:
                 continue
             note_path = self._write_note(query, url, content)
-            triples = self._extract_triples(prompt, content)
+            triples = self._extract_triples(prompt, content, budget=budget)
             ids = []
             for triple in triples:
                 try:
@@ -64,13 +71,13 @@ class QueryOracle:
         return results
 
     # ------------------------------------------------------------------
-    def _plan_queries(self, prompt: str) -> List[str]:
+    def _plan_queries(self, prompt: str, *, budget: Optional[TokenBudget] = None) -> List[str]:
         guidance = (
             "List up to 5 focused search queries that help a developer research: "
             + prompt
             + ". Output JSON array of strings."
         )
-        raw = self.llm.generate(guidance) or "[]"
+        raw = self.llm.generate(guidance, budget=budget, label="oracle:plan") or "[]"
         try:
             data = json.loads(raw)
             if isinstance(data, list):
@@ -80,9 +87,16 @@ class QueryOracle:
         # fallback simple heuristics
         return [prompt]
 
-    def _choose_url(self, query: str) -> str | None:
+    def _choose_url(
+        self,
+        query: str,
+        *,
+        budget: Optional[TokenBudget] = None,
+    ) -> str | None:
         suggestion = self.llm.generate(
-            f"Provide a single documentation URL (only allowlisted domains) answering: {query}."
+            f"Provide a single documentation URL (only allowlisted domains) answering: {query}.",
+            budget=budget,
+            label="oracle:url",
         )
         if suggestion:
             suggestion = suggestion.strip().split()[0]
@@ -114,13 +128,21 @@ class QueryOracle:
         )
         return fname
 
-    def _extract_triples(self, prompt: str, content: str) -> List[List[str]]:
+    def _extract_triples(
+        self,
+        prompt: str,
+        content: str,
+        *,
+        budget: Optional[TokenBudget] = None,
+    ) -> List[List[str]]:
         raw = self.llm.generate(
             """Convert the following documentation into at most 3 belief triples in format
 [{"subject": str, "relation": str, "object": str}].
 Focus on actionable dev guidance.
 """
-            + content[:1500]
+            + content[:1500],
+            budget=budget,
+            label="oracle:triples",
         )
         try:
             data = json.loads(raw)

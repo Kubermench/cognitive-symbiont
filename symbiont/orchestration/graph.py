@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -11,6 +11,7 @@ import yaml
 
 from ..agents.registry import AgentRegistry
 from ..agents.subself import SubSelf
+from ..llm.budget import TokenBudget
 from ..memory.db import MemoryDB
 from ..tools import scriptify, sd_engine
 from .systems import governance_snapshot
@@ -47,6 +48,7 @@ class GraphSpec:
     nodes: Dict[str, NodeSpec]
     crew_config: Path
     simulation: Optional[Dict[str, Any]] = None
+    parallel_groups: list[list[str]] = field(default_factory=list)
 
     @classmethod
     def from_yaml(cls, path: Path) -> "GraphSpec":
@@ -70,7 +72,15 @@ class GraphSpec:
         if not crew_config.exists():
             raise ValueError(f"Crew config not found at {crew_config}")
         simulation = data.get("simulation") or None
-        return cls(start=start, nodes=nodes, crew_config=crew_config, simulation=simulation)
+        parallel = graph_data.get("parallel", [])
+        parallel_groups = [list(group) for group in parallel if isinstance(group, (list, tuple))]
+        return cls(
+            start=start,
+            nodes=nodes,
+            crew_config=crew_config,
+            simulation=simulation,
+            parallel_groups=parallel_groups,
+        )
 
 
 class GraphRunner:
@@ -95,8 +105,34 @@ class GraphRunner:
         self.graph_artifacts.mkdir(parents=True, exist_ok=True)
         self.simulation_dir = self.graph_artifacts / "simulations"
         self.simulation_dir.mkdir(parents=True, exist_ok=True)
+        self.parallel_groups = spec.parallel_groups
+        self.parallel_map: Dict[str, list[str]] = {}
+        for group in self.parallel_groups:
+            for node_name in group:
+                self.parallel_map[node_name] = group
+        self.parallel_progress: Dict[str, int] = {
+            self._group_key(group): 0 for group in self.parallel_groups
+        }
+        self.current_handoff: Optional[Dict[str, Any]] = None
+        self.token_budget: Optional[TokenBudget] = None
 
     def run(self, goal: str, resume_state: Optional[Path] = None) -> Path | Dict[str, Any]:
+        limit = 0
+        if isinstance(self.cfg, dict):
+            try:
+                limit = int(self.cfg.get("max_tokens", 0) or 0)
+            except (TypeError, ValueError):
+                limit = 0
+        data_root = Path(
+            self.cfg.get("data_root")
+            or Path(self.cfg.get("db_path", "./data/symbiont.db")).parent
+        )
+        budget_label = "graph"
+        if self.graph_path:
+            budget_label = f"graph:{self.graph_path.stem}"
+        sink_path = data_root / "token_budget" / f"{budget_label}.json"
+        self.token_budget = TokenBudget(limit=limit, label=budget_label, sink_path=sink_path)
+
         if resume_state:
             state = json.loads(resume_state.read_text())
             current = state.get("current_node")
@@ -104,12 +140,32 @@ class GraphRunner:
             goal = state.get("goal", goal)
             timestamp = state.get("timestamp", int(time.time()))
             state_path = resume_state
+            saved_progress = state.get("parallel_progress") or {}
+            for group in self.parallel_groups:
+                key = self._group_key(group)
+                if key in saved_progress:
+                    self.parallel_progress[key] = int(saved_progress[key])
+            self.current_handoff = state.get("handoff") or None
+            self.token_budget.restore(state.get("token_budget"))
+            self.token_budget.sink_path = sink_path
+            if self.current_handoff and self.current_handoff.get("status") != "resolved":
+                return {
+                    "status": "handoff_pending",
+                    "state": str(state_path),
+                    "handoff": self.current_handoff,
+                    "current_node": current,
+                }
         else:
             current = self.spec.start
             history = []
             timestamp = int(time.time())
             state_path = self.state_dir / f"graph_state_{timestamp}.json"
-        context = {"goal": goal, "episode_id": None, "cwd": Path.cwd()}
+        context = {
+            "goal": goal,
+            "episode_id": None,
+            "cwd": Path.cwd(),
+            "token_budget": self.token_budget,
+        }
         self.db.ensure_schema()
         latest_bullets: Iterable[str] = []
         pause_between = bool((self.cfg.get("ui") or {}).get("pause_between_nodes", False))
@@ -148,9 +204,20 @@ class GraphRunner:
                         timestamp,
                         awaiting_human=False,
                         last_node=last_node,
+                        handoff=self.current_handoff,
                     )
             if not current:
                 return self._persist_artifact(goal, history, timestamp)
+            if self.current_handoff and self.current_handoff.get("status") == "resolved":
+                current, latest_bullets = self._finalize_handoff(
+                    current,
+                    history,
+                    context,
+                    latest_bullets,
+                    goal=goal,
+                    timestamp=timestamp,
+                    state_path=state_path,
+                )
         if not resume_state and self.spec.simulation:
             blueprint = self.spec.simulation.get("blueprint") or self._default_blueprint()
             context["sd_blueprint"] = blueprint
@@ -183,7 +250,12 @@ class GraphRunner:
             agent_spec = self.registry.get_agent(node.agent)
             llm_client = agent_spec.create_llm_client()
             role_dict = {"name": agent_spec.role}
-            agent = SubSelf(role_dict, self.cfg, llm_client=llm_client)
+            agent = SubSelf(
+                role_dict,
+                self.cfg,
+                llm_client=llm_client,
+                token_budget=self.token_budget,
+            )
             result = agent.run(context, self.db)
             history.append(
                 {
@@ -192,39 +264,31 @@ class GraphRunner:
                     "result": result,
                 }
             )
+            handoff_response = self._maybe_begin_handoff(
+                node,
+                agent_spec,
+                result,
+                history,
+                goal=goal,
+                state_path=state_path,
+                timestamp=timestamp,
+            )
+            if handoff_response:
+                return handoff_response
 
-            if agent_spec.role == "dynamics_scout" and isinstance(result, dict):
-                blueprint = result.get("sd_blueprint")
-                if blueprint:
-                    combined = self._merge_blueprints(context.get("sd_blueprint"), blueprint)
-                    context["sd_blueprint"] = combined
-            if agent_spec.role == "sd_modeler" and isinstance(result, dict):
-                blueprint = context.get("sd_blueprint") or self._default_blueprint()
-                horizon = int(result.get("horizon", self.spec.simulation.get("horizon", 60) if self.spec.simulation else 60))
-                noise = float(result.get("noise", self.spec.simulation.get("noise", 0.0) if self.spec.simulation else 0.0))
-                try:
-                    projection = self._execute_simulation(
-                        blueprint,
-                        goal=goal,
-                        timestamp=timestamp,
-                        label=node.name,
-                        horizon=horizon,
-                        noise=noise,
-                    )
-                    context["sd_projection"] = projection
-                    context["sd_projection_summary"] = projection.get("stats")
-                    history[-1]["simulation"] = self._compact_simulation(projection)
-                except Exception as exc:  # pragma: no cover - safety
-                    history[-1]["simulation_error"] = str(exc)
-
-            outcome = self._classify_result(result)
-            if agent_spec.role == "architect":
-                latest_bullets = result.get("bullets", [])
-            if agent_spec.role == "executor":
-                script_path = self._write_script(latest_bullets, context)
-                history[-1]["script"] = str(script_path)
+            outcome, latest_bullets = self._process_agent_result(
+                agent_spec,
+                node,
+                result,
+                history,
+                context,
+                latest_bullets,
+                goal=goal,
+                timestamp=timestamp,
+            )
 
             next_node = self._determine_next(node, outcome)
+            next_node = self._resolve_parallel_next(node, outcome, next_node)
 
             if pause_between and node.agent != "sd_engine":
                 self._save_state(
@@ -235,6 +299,7 @@ class GraphRunner:
                     timestamp,
                     awaiting_human=True,
                     last_node=node.name,
+                    handoff=self.current_handoff,
                 )
                 return {
                     "status": "paused",
@@ -254,6 +319,7 @@ class GraphRunner:
                 timestamp,
                 awaiting_human=False,
                 last_node=node.name,
+                handoff=self.current_handoff,
             )
 
         artifact = self._persist_artifact(goal, history, timestamp)
@@ -265,6 +331,7 @@ class GraphRunner:
             timestamp,
             final=True,
             awaiting_human=False,
+            handoff=self.current_handoff,
         )
         return artifact
 
@@ -319,6 +386,8 @@ class GraphRunner:
                     snapshot["rogue_baseline"],
                     snapshot["alert_threshold"],
                 )
+        if hasattr(self, "token_budget") and self.token_budget:
+            payload["token_budget"] = self.token_budget.snapshot()
         artifact_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return artifact_path
 
@@ -425,6 +494,7 @@ class GraphRunner:
         final: bool = False,
         awaiting_human: bool = False,
         last_node: Optional[str] = None,
+        handoff: Optional[Dict[str, Any]] = None,
     ) -> None:
         data = {
             "goal": goal,
@@ -438,4 +508,271 @@ class GraphRunner:
             "awaiting_human": awaiting_human,
             "last_node": last_node,
         }
+        data["parallel_progress"] = {
+            self._group_key(group): progress for group, progress in self._iter_group_progress()
+        }
+        if hasattr(self, "token_budget") and self.token_budget:
+            data["token_budget"] = self.token_budget.snapshot()
+        if handoff:
+            data["handoff"] = handoff
         state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def _maybe_begin_handoff(
+        self,
+        node: NodeSpec,
+        agent_spec,
+        result: Dict[str, Any],
+        history: list[dict[str, Any]],
+        *,
+        goal: str,
+        state_path: Path,
+        timestamp: int,
+    ) -> Optional[Dict[str, Any]]:
+        handoff = result.get("handoff") if isinstance(result, dict) else None
+        if not isinstance(handoff, dict):
+            return None
+
+        description = handoff.get("description") or handoff.get("title") or f"Handoff from {node.name}"
+        assignee = handoff.get("assignee") or agent_spec.role
+        episode_id = handoff.get("episode_id") or (
+            self.cfg.get("episode_id") if isinstance(self.cfg, dict) else None
+        )
+        task_id: Optional[int] = None
+        try:
+            task_id = self.db.add_task(
+                episode_id=episode_id,
+                description=description,
+                status="pending",
+                assignee_role=str(assignee),
+            )
+        except Exception:
+            logger.debug("Failed to persist handoff task", exc_info=True)
+
+        self.current_handoff = {
+            "node": node.name,
+            "agent": node.agent,
+            "status": "pending",
+            "created_at": int(time.time()),
+            "description": description,
+            "assignee": assignee,
+            "task_id": task_id,
+            "payload": handoff,
+        }
+        result.setdefault("handoff", {})
+        result["handoff"].update({"task_id": task_id, "status": "pending"})
+        history[-1]["handoff"] = self.current_handoff
+        self._notify_handoff(self.current_handoff)
+        self._save_state(
+            state_path,
+            goal,
+            node.name,
+            history,
+            timestamp,
+            awaiting_human=True,
+            last_node=node.name,
+            handoff=self.current_handoff,
+        )
+        return {
+            "status": "handoff_pending",
+            "state": str(state_path),
+            "handoff": self.current_handoff,
+            "last_node": node.name,
+        }
+
+    def _process_agent_result(
+        self,
+        agent_spec,
+        node: NodeSpec,
+        result: Dict[str, Any],
+        history: list[dict[str, Any]],
+        context: Dict[str, Any],
+        latest_bullets: Iterable[str],
+        *,
+        goal: str,
+        timestamp: int,
+    ) -> tuple[str, Iterable[str]]:
+        if agent_spec.role == "dynamics_scout" and isinstance(result, dict):
+            blueprint = result.get("sd_blueprint")
+            if blueprint:
+                combined = self._merge_blueprints(context.get("sd_blueprint"), blueprint)
+                context["sd_blueprint"] = combined
+        if agent_spec.role == "sd_modeler" and isinstance(result, dict):
+            blueprint = context.get("sd_blueprint") or self._default_blueprint()
+            horizon = int(
+                result.get(
+                    "horizon",
+                    self.spec.simulation.get("horizon", 60) if self.spec.simulation else 60,
+                )
+            )
+            noise = float(
+                result.get(
+                    "noise",
+                    self.spec.simulation.get("noise", 0.0) if self.spec.simulation else 0.0,
+                )
+            )
+            try:
+                projection = self._execute_simulation(
+                    blueprint,
+                    goal=goal,
+                    timestamp=timestamp,
+                    label=node.name,
+                    horizon=horizon,
+                    noise=noise,
+                )
+                context["sd_projection"] = projection
+                context["sd_projection_summary"] = projection.get("stats")
+                history[-1]["simulation"] = self._compact_simulation(projection)
+            except Exception as exc:  # pragma: no cover - safety
+                history[-1]["simulation_error"] = str(exc)
+
+        outcome = self._classify_result(result)
+        if agent_spec.role == "architect" and isinstance(result, dict):
+            latest_bullets = result.get("bullets", [])
+        if agent_spec.role == "executor" and isinstance(result, dict):
+            script_path = self._write_script(latest_bullets, context)
+            history[-1]["script"] = str(script_path)
+        return outcome, latest_bullets
+
+    def _finalize_handoff(
+        self,
+        current: Optional[str],
+        history: list[dict[str, Any]],
+        context: Dict[str, Any],
+        latest_bullets: Iterable[str],
+        *,
+        goal: str,
+        timestamp: int,
+        state_path: Path,
+    ) -> tuple[Optional[str], Iterable[str]]:
+        handoff = self.current_handoff or {}
+        node_name = handoff.get("node")
+        if not node_name:
+            return current, latest_bullets
+        node_spec = self.spec.nodes.get(node_name)
+        if not node_spec:
+            logger.warning("Handoff references unknown node '%s'", node_name)
+            self.current_handoff = None
+            return current, latest_bullets
+
+        resolution = handoff.get("result") or {}
+        outcome = handoff.get("outcome")
+        if not outcome:
+            outcome = self._classify_result(resolution)
+            handoff["outcome"] = outcome
+
+        for entry in reversed(history):
+            if entry.get("node") == node_name:
+                entry["result"] = resolution
+                entry.setdefault("handoff_resolution", {}).update(
+                    {
+                        "outcome": outcome,
+                        "resolved_at": handoff.get("resolved_at"),
+                        "note": handoff.get("note"),
+                    }
+                )
+                break
+
+        agent_spec = self.registry.get_agent(node_spec.agent)
+        _, latest_bullets = self._process_agent_result(
+            agent_spec,
+            node_spec,
+            resolution,
+            history,
+            context,
+            latest_bullets,
+            goal=goal,
+            timestamp=timestamp,
+        )
+
+        next_node = self._determine_next(node_spec, outcome)
+        next_node = self._resolve_parallel_next(node_spec, outcome, next_node)
+
+        task_id = handoff.get("task_id")
+        if task_id:
+            try:
+                self.db.update_task_status(
+                    task_id,
+                    status=str(outcome),
+                    result=json.dumps(resolution),
+                )
+            except Exception:
+                logger.debug("Failed to update handoff task status", exc_info=True)
+
+        self.current_handoff = None
+        self._save_state(
+            state_path,
+            goal,
+            next_node,
+            history,
+            timestamp,
+            awaiting_human=False,
+            last_node=node_name,
+            handoff=None,
+        )
+        return next_node, latest_bullets
+
+    def _notify_handoff(self, handoff: Dict[str, Any]) -> None:
+        notif_cfg = (self.cfg.get("notifications") or {}) if isinstance(self.cfg, dict) else {}
+        url = notif_cfg.get("handoff_webhook_url")
+        if not url:
+            return
+        payload = {
+            "goal": handoff.get("description"),
+            "node": handoff.get("node"),
+            "agent": handoff.get("agent"),
+            "assignee": handoff.get("assignee"),
+            "state": handoff.get("status"),
+            "created_at": handoff.get("created_at"),
+            "task_id": handoff.get("task_id"),
+        }
+        try:
+            import requests
+
+            requests.post(url, json=payload, timeout=float(notif_cfg.get("timeout_seconds", 5)))
+        except Exception:
+            logger.debug("Failed to dispatch handoff webhook", exc_info=True)
+
+    def _resolve_parallel_next(
+        self,
+        node: NodeSpec,
+        outcome: str,
+        candidate: Optional[str],
+    ) -> Optional[str]:
+        group = self.parallel_map.get(node.name)
+        if not group:
+            return candidate
+        key = self._group_key(group)
+        try:
+            idx = group.index(node.name)
+        except ValueError:
+            return candidate
+
+        # Guard explicit routing first: honor explicit targets outside the group.
+        if outcome in {"block", "failure"}:
+            self.parallel_progress[key] = 0
+            if candidate and candidate not in group:
+                return candidate
+            return None
+
+        # For success, respect explicit branch that leaves the group.
+        if candidate and candidate not in group:
+            self.parallel_progress[key] = 0
+            return candidate
+
+        next_idx = idx + 1
+        if next_idx < len(group):
+            self.parallel_progress[key] = next_idx
+            return group[next_idx]
+
+        # Completed the group; fall back to candidate if it escapes, else None.
+        self.parallel_progress[key] = 0
+        if candidate and candidate not in group:
+            return candidate
+        return candidate if candidate else None
+
+    def _group_key(self, group: list[str]) -> str:
+        return "|".join(group)
+
+    def _iter_group_progress(self) -> Iterable[tuple[list[str], int]]:
+        for group in self.parallel_groups:
+            yield group, self.parallel_progress.get(self._group_key(group), 0)
