@@ -4,7 +4,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from ..llm.client import LLMClient
 from ..tools.files import ensure_dirs
@@ -16,6 +16,7 @@ class PeerTranscript:
     response: str
     simulated: bool
     path: str
+    agent_id: Optional[str]
 
 
 class AIPeerBridge:
@@ -29,14 +30,20 @@ class AIPeerBridge:
         ensure_dirs([self.transcripts_dir])
         self.llm = LLMClient(self.config.get("llm", {}))
 
-    def chat(self, prompt: str, simulate_only: bool = False) -> PeerTranscript:
+    def chat(self, prompt: str, simulate_only: bool = False, agent_id: Optional[str] = None) -> PeerTranscript:
         simulated = self.stub_mode or simulate_only
         if simulated:
             reply = self._simulate(prompt)
         else:
             reply = self._relay(prompt)
-        path = self._store(prompt, reply, simulated)
-        return PeerTranscript(prompt=prompt, response=reply, simulated=simulated, path=str(path))
+        path = self._store(prompt, reply, simulated, agent_id)
+        return PeerTranscript(
+            prompt=prompt,
+            response=reply,
+            simulated=simulated,
+            path=str(path),
+            agent_id=agent_id,
+        )
 
     def _simulate(self, prompt: str) -> str:
         guidance = (
@@ -50,7 +57,7 @@ class AIPeerBridge:
         # For now we reuse simulation to guarantee deterministic behaviour.
         return self._simulate(prompt)
 
-    def _store(self, prompt: str, reply: str, simulated: bool) -> Path:
+    def _store(self, prompt: str, reply: str, simulated: bool, agent_id: Optional[str]) -> Path:
         ts = int(time.time())
         path = self.transcripts_dir / f"peer_{ts}.json"
         payload = {
@@ -58,7 +65,7 @@ class AIPeerBridge:
             "response": reply,
             "simulated": simulated,
             "timestamp": ts,
+            "agent_id": agent_id,
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path
-

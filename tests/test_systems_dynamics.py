@@ -12,6 +12,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from symbiont.orchestration.graph import GraphRunner, GraphSpec, NodeSpec
+from symbiont.agents.registry import AgentRegistry
+from symbiont.memory.db import MemoryDB
 from symbiont.orchestration.systems import forecast_rogue_drift, governance_snapshot
 from symbiont.cli import app as cli_app
 from symbiont.memory.db import MemoryDB
@@ -59,6 +61,86 @@ def test_persist_artifact_includes_governance(tmp_path):
     assert len(governance["rogue_forecast"]) == 2
     assert governance["alert"] is True
     assert governance["alert_threshold"] == 0.25
+
+
+def test_graph_runner_pause_and_resume(tmp_path, monkeypatch):
+    crews_yaml = tmp_path / "crews.yaml"
+    crews_yaml.write_text(
+        """
+agents:
+  arch:
+    role: architect
+    llm: {}
+    cache: in_memory
+    tools: []
+  exec:
+    role: executor
+    llm: {}
+    cache: in_memory
+    tools: []
+crew:
+  demo:
+    sequence:
+      - arch
+      - exec
+""",
+        encoding="utf-8",
+    )
+
+    graph_yaml = tmp_path / "graph.yaml"
+    graph_yaml.write_text(
+        """
+crew_config: crews.yaml
+
+graph:
+  start: n1
+  nodes:
+    n1:
+      agent: arch
+      on_block: END
+      next: n2
+    n2:
+      agent: exec
+      next: END
+""",
+        encoding="utf-8",
+    )
+
+    spec = GraphSpec.from_yaml(graph_yaml)
+    registry = AgentRegistry.from_yaml(crews_yaml)
+    cfg = {
+        "db_path": str(tmp_path / "sym.db"),
+        "ui": {"pause_between_nodes": True},
+    }
+    db = MemoryDB(cfg["db_path"])
+    runner = GraphRunner(spec, registry, cfg, db, graph_path=graph_yaml)
+
+    def fake_run(self, context, memory):
+        if self.name == "architect":
+            return {"bullets": ["do thing"], "next_step": "apply", "verdict": "ok"}
+        if self.name == "executor":
+            return {"verdict": "ok"}
+        return {}
+
+    monkeypatch.setattr("symbiont.agents.subself.SubSelf.run", fake_run)
+
+    paused = runner.run("Demo goal")
+    assert isinstance(paused, dict) and paused["status"] == "paused"
+    state_path = Path(paused["state"])
+    data = json.loads(state_path.read_text())
+    assert data["awaiting_human"] is True
+    assert data["current_node"] == "n2"
+
+    # Simulate human editing architect verdict to block, forcing END
+    data["history"][-1]["result"]["verdict"] = "block"
+    state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    cfg["ui"]["pause_between_nodes"] = False
+    resumed = runner.run("Demo goal", resume_state=state_path)
+    assert isinstance(resumed, Path)
+    assert resumed.exists()
+    final_state = json.loads(state_path.read_text())
+    assert final_state.get("awaiting_human") is False
 
 
 def test_graph_runner_runs_simulation_for_sd_modeler(tmp_path):

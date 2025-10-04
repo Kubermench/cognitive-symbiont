@@ -7,6 +7,8 @@ data/artifacts/
 data/evolution/
 sandbox/sandbox/.state/
 sandbox/.pytest_cache/
+.coverage
+coverage.xml
 
 # Local environments
 .venv/

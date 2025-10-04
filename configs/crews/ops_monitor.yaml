@@ -1,0 +1,43 @@
+agents:
+  ops_scout:
+    role: ops_scout
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: local
+    cache: in_memory
+    tools: [repo_scan]
+  ops_researcher:
+    role: ops_researcher
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  ops_specialist:
+    role: ops_specialist
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: local
+    cache: in_memory
+    tools: []
+  judge:
+    role: judge
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 400
+    cache: in_memory
+    tools: []
+
+crew:
+  ops_monitor:
+    sequence:
+      - ops_scout
+      - ops_researcher
+      - ops_specialist
+      - judge

@@ -2,9 +2,12 @@ from __future__ import annotations
 import os, time, json, subprocess
 from typing import Dict, Any, Tuple, List, Optional
 
+import logging
+
 from ..orchestrator import Orchestrator
 from ..tools.files import ensure_dirs
 from .watchers import RepoWatchConfig, build_repo_watch_configs
+from .pubsub import get_client
 
 
 STATE_DIR = os.path.join("./data", "initiative")
@@ -37,6 +40,18 @@ def _save_state(st: Dict[str, Any]):
     ensure_dirs([STATE_DIR])
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(st, f)
+
+
+def _publish_event(cfg: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    client = get_client(cfg)
+    if not getattr(client, "enabled", False):
+        return
+    event = dict(payload)
+    event.setdefault("timestamp", _now())
+    try:
+        client.publish(event)
+    except Exception as exc:  # pragma: no cover - should be rare
+        logger.warning("Failed publishing initiative event: %s", exc)
 
 
 def request_stop():
@@ -224,12 +239,29 @@ def propose_once(cfg: Dict[str, Any], reason: str = "watchers", *, target: RepoW
         st["targets"][path]["last_proposal"] = now
         st["targets"][path]["last_check"] = now
     _save_state(st)
+    _publish_event(
+        cfg,
+        {
+            "type": "initiative.proposal",
+            "reason": reason,
+            "goal": goal,
+            "target": str(target.path) if target else None,
+            "decision": res.get("decision", {}).get("action"),
+        },
+    )
     return res
 
 
 def run_once_if_triggered(cfg: Dict[str, Any]) -> Tuple[bool, List[str], Dict[str, Any] | None, Optional[RepoWatchConfig]]:
     ok, reasons, target = _should_trigger(cfg)
     if not ok:
+        _publish_event(
+            cfg,
+            {
+                "type": "initiative.idle",
+                "reasons": reasons,
+            },
+        )
         return False, reasons, None, target
     res = propose_once(cfg, reason=",".join(reasons), target=target)
     st = _load_state()
@@ -242,6 +274,15 @@ def run_once_if_triggered(cfg: Dict[str, Any]) -> Tuple[bool, List[str], Dict[st
         st["targets"][path]["last_proposal"] = now
         st["targets"][path]["last_check"] = now
     _save_state(st)
+    _publish_event(
+        cfg,
+        {
+            "type": "initiative.proposal",
+            "reason": ",".join(reasons),
+            "goal": res.get("goal") if isinstance(res, dict) else None,
+            "target": str(target.path) if target else None,
+        },
+    )
     return True, reasons, res, target
 
 
@@ -290,3 +331,4 @@ def get_status() -> Dict[str, Any]:
         "daemon_pid": int(st.get("daemon_pid", 0)),
         "state_path": os.path.abspath(STATE_PATH),
     }
+logger = logging.getLogger(__name__)

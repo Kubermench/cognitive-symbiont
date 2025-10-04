@@ -18,6 +18,11 @@ initiative:
   goal_template: Repo idle; propose one 10-minute refactor and draft a script.
   watch_config_path: ./configs/watch_targets.yaml
   autonomy_mode: guarded
+  pubsub:
+    enabled: false
+    backend: memory  # memory | redis
+    channel: symbiont:initiative
+    log_path: ./data/initiative/events.jsonl
 evolution:
   enabled: true
   repeat_threshold: 3
@@ -52,6 +57,7 @@ llm:
         path: .env
         key: OPENAI_API_KEY
     timeout_seconds: 30
+    refresh_seconds: 3600
 ports:
   oracle:
     allowlist:
@@ -72,6 +78,10 @@ voice:
   wake_word: symbiont
 guard:
   auto_approve_safe: false
+  judge:
+    enabled: false
+    risk_threshold: 0.6
+    prompt: "You are a safeguard judge. Assess the plan and return JSON {\"risk\": float, \"verdict\": string, \"reasons\": [string]}\nPlan:\n{plan}\n"
 browser:
   enabled: true
   allowlist:
@@ -84,3 +94,4 @@ autopilot:
 ui:
   confirm_intent: false
   beginner_mode: true
+  pause_between_nodes: false

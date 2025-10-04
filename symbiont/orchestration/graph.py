@@ -96,21 +96,61 @@ class GraphRunner:
         self.simulation_dir = self.graph_artifacts / "simulations"
         self.simulation_dir.mkdir(parents=True, exist_ok=True)
 
-    def run(self, goal: str, resume_state: Optional[Path] = None) -> Path:
+    def run(self, goal: str, resume_state: Optional[Path] = None) -> Path | Dict[str, Any]:
         if resume_state:
             state = json.loads(resume_state.read_text())
             current = state.get("current_node")
             history = state.get("history", [])
             goal = state.get("goal", goal)
             timestamp = state.get("timestamp", int(time.time()))
+            state_path = resume_state
         else:
             current = self.spec.start
             history = []
             timestamp = int(time.time())
-        state_path = self.state_dir / f"graph_state_{timestamp}.json"
+            state_path = self.state_dir / f"graph_state_{timestamp}.json"
         context = {"goal": goal, "episode_id": None, "cwd": Path.cwd()}
         self.db.ensure_schema()
         latest_bullets: Iterable[str] = []
+        pause_between = bool((self.cfg.get("ui") or {}).get("pause_between_nodes", False))
+
+        if resume_state:
+            # Rehydrate context from history so resumed runs behave deterministically.
+            for entry in history:
+                agent_name = entry.get("agent")
+                if not agent_name:
+                    continue
+                try:
+                    role = self.registry.get_agent(agent_name).role
+                except KeyError:
+                    role = agent_name
+                result = entry.get("result") or {}
+                if role == "dynamics_scout" and isinstance(result, dict):
+                    blueprint = result.get("sd_blueprint")
+                    if blueprint:
+                        context["sd_blueprint"] = blueprint
+                if role == "sd_modeler" and isinstance(result, dict):
+                    context["sd_projection"] = result
+                    context["sd_projection_summary"] = result.get("stats")
+                if role == "architect" and isinstance(result, dict):
+                    latest_bullets = result.get("bullets", [])
+            last_node = state.get("last_node")
+            if last_node and history:
+                node_spec = self.spec.nodes.get(last_node)
+                if node_spec:
+                    outcome = self._classify_result(history[-1].get("result", {}))
+                    current = self._determine_next(node_spec, outcome)
+                    self._save_state(
+                        state_path,
+                        goal,
+                        current,
+                        history,
+                        timestamp,
+                        awaiting_human=False,
+                        last_node=last_node,
+                    )
+            if not current:
+                return self._persist_artifact(goal, history, timestamp)
         if not resume_state and self.spec.simulation:
             blueprint = self.spec.simulation.get("blueprint") or self._default_blueprint()
             context["sd_blueprint"] = blueprint
@@ -145,12 +185,13 @@ class GraphRunner:
             role_dict = {"name": agent_spec.role}
             agent = SubSelf(role_dict, self.cfg, llm_client=llm_client)
             result = agent.run(context, self.db)
-            history.append({
-                "node": current,
-                "agent": node.agent,
-                "result": result,
-            })
-            self._save_state(state_path, goal, current, history, timestamp)
+            history.append(
+                {
+                    "node": current,
+                    "agent": node.agent,
+                    "result": result,
+                }
+            )
 
             if agent_spec.role == "dynamics_scout" and isinstance(result, dict):
                 blueprint = result.get("sd_blueprint")
@@ -184,12 +225,47 @@ class GraphRunner:
                 history[-1]["script"] = str(script_path)
 
             next_node = self._determine_next(node, outcome)
+
+            if pause_between and node.agent != "sd_engine":
+                self._save_state(
+                    state_path,
+                    goal,
+                    next_node,
+                    history,
+                    timestamp,
+                    awaiting_human=True,
+                    last_node=node.name,
+                )
+                return {
+                    "status": "paused",
+                    "state": str(state_path),
+                    "last_node": node.name,
+                    "next_node": next_node,
+                }
+
             if not next_node:
                 break
             current = next_node
+            self._save_state(
+                state_path,
+                goal,
+                current,
+                history,
+                timestamp,
+                awaiting_human=False,
+                last_node=node.name,
+            )
 
         artifact = self._persist_artifact(goal, history, timestamp)
-        self._save_state(state_path, goal, current, history, timestamp, final=True)
+        self._save_state(
+            state_path,
+            goal,
+            current,
+            history,
+            timestamp,
+            final=True,
+            awaiting_human=False,
+        )
         return artifact
 
     def _classify_result(self, result: Dict[str, Any]) -> str:
@@ -347,6 +423,8 @@ class GraphRunner:
         timestamp: int,
         *,
         final: bool = False,
+        awaiting_human: bool = False,
+        last_node: Optional[str] = None,
     ) -> None:
         data = {
             "goal": goal,
@@ -357,5 +435,7 @@ class GraphRunner:
             "crew_config": str(self.spec.crew_config),
             "graph_path": str(self.graph_path) if self.graph_path else None,
             "final": final,
+            "awaiting_human": awaiting_human,
+            "last_node": last_node,
         }
         state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -20,14 +21,18 @@ class LLMClient:
         self.hybrid_threshold = int(cfg.get("hybrid_threshold_tokens", 800))
         self.cloud_cfg = cfg.get("cloud", {}) or {}
         self._cloud_client = None
+        self._cloud_last_refresh = 0.0
+        self._cloud_refresh_seconds = int(self.cloud_cfg.get("refresh_seconds", 3600))
         if self.mode in {"cloud", "hybrid"} and self.cloud_cfg:
             self._init_cloud_client()
 
     def generate(self, prompt: str) -> str:
         # Hybrid mode chooses local vs cloud dynamically
         if self.mode == "cloud":
+            self._refresh_cloud_client_if_needed()
             primary = self._generate_cloud(prompt)
         elif self.mode == "hybrid":
+            self._refresh_cloud_client_if_needed()
             if self._should_use_cloud(prompt):
                 primary = self._generate_cloud(prompt)
                 if not primary.strip():
@@ -139,6 +144,7 @@ class LLMClient:
                 timeout_seconds=int(self.cloud_cfg.get("timeout_seconds", 30)),
             )
             self._cloud_client = CloudLLMClient(config)
+            self._cloud_last_refresh = time.monotonic()
         except CloudLLMError as exc:
             logger.warning("Cloud LLM unavailable: %s", exc)
             self._cloud_client = None
@@ -161,3 +167,15 @@ class LLMClient:
         except Exception as exc:  # pragma: no cover - surfaced via logs
             logger.warning("Cloud LLM error: %s", exc)
             return ""
+
+    def _refresh_cloud_client_if_needed(self) -> None:
+        if not self._cloud_client:
+            if self.cloud_cfg:
+                self._init_cloud_client()
+            return
+        if self._cloud_refresh_seconds <= 0:
+            return
+        now = time.monotonic()
+        if now - self._cloud_last_refresh >= self._cloud_refresh_seconds:
+            logger.info("Refreshing cloud LLM credentials after %s seconds", self._cloud_refresh_seconds)
+            self._init_cloud_client()
