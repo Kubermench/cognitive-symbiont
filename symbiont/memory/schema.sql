@@ -25,3 +25,13 @@ CREATE TABLE IF NOT EXISTS episode_artifacts (
   artifact_id INTEGER,
   linked_at INTEGER DEFAULT (strftime('%s','now'))
 );
+CREATE TABLE IF NOT EXISTS sd_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  goal TEXT,
+  label TEXT,
+  horizon INTEGER,
+  timestep REAL,
+  stats_json TEXT,
+  plot_path TEXT,
+  created_at INTEGER DEFAULT (strftime('%s','now'))
+);

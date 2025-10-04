@@ -1,0 +1,64 @@
+crew_config: ../crews.yaml
+
+simulation:
+  horizon: 60
+  noise: 0.01
+  blueprint:
+    timestep: 1.0
+    stocks:
+      - name: autonomy
+        initial: 0.5
+        min: 0.0
+        max: 1.0
+      - name: rogue
+        initial: 0.2
+        min: 0.0
+        max: 1.0
+      - name: latency
+        initial: 0.25
+        min: 0.0
+        max: 1.5
+      - name: knowledge
+        initial: 0.45
+        min: 0.0
+        max: 2.0
+    auxiliaries:
+      - name: proposal_rate
+        expression: "0.35 + 0.4 * autonomy"
+      - name: guard_pressure
+        expression: "max(0.0, rogue - 0.35)"
+      - name: latency_drag
+        expression: "0.25 * latency"
+    flows:
+      - name: autonomy_gain
+        target: autonomy
+        expression: "0.08 * proposal_rate - 0.05 * guard_pressure"
+      - name: rogue_drift
+        target: rogue
+        expression: "0.04 * autonomy - 0.07 * guard_pressure"
+      - name: latency_load
+        target: latency
+        expression: "0.05 * proposal_rate - 0.06"
+      - name: knowledge_compound
+        target: knowledge
+        expression: "0.07 * proposal_rate - 0.04 * guard_pressure"
+    parameters:
+      trend_autonomy: 0.05
+      trend_latency: 0.03
+
+graph:
+  start: dynamics
+  nodes:
+    dynamics:
+      agent: dynamics_scout
+      next: modeler
+    modeler:
+      agent: sd_modeler
+      next: strategist
+    strategist:
+      agent: strategist
+      next: critic
+    critic:
+      agent: critic
+      on_block: END
+      next: END

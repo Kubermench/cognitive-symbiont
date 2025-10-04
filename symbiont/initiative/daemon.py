@@ -155,6 +155,43 @@ def _should_trigger(cfg: Dict[str, Any]) -> Tuple[bool, List[str], Optional[Repo
     return False, ["no_target_ready"], None
 
 
+def _retry(
+    operation,
+    *,
+    attempts: int = 3,
+    base_delay: float = 1.0,
+    backoff: float = 2.0,
+    sleep_fn = time.sleep,
+):
+    """Retry *operation* with simple exponential backoff.
+
+    Keeps delays short by default (1s, 2s, 4s) and re-raises the
+    final exception so callers can surface context to the user.
+    """
+
+    if attempts <= 0:
+        raise ValueError("attempts must be positive")
+
+    delay = max(0.0, float(base_delay))
+    factor = max(1.0, float(backoff))
+    last_exc: Exception | None = None
+
+    for remaining in range(attempts):
+        try:
+            return operation()
+        except Exception as exc:  # pragma: no cover - raised in tests to assert behaviour
+            last_exc = exc
+            if remaining == attempts - 1:
+                break
+            if delay > 0:
+                sleep_fn(delay)
+            delay *= factor
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("retry failed without raising")
+
+
 def propose_once(cfg: Dict[str, Any], reason: str = "watchers", *, target: RepoWatchConfig | None = None) -> Dict[str, Any]:
     goal = cfg.get("initiative", {}).get(
         "goal_template",
@@ -165,7 +202,18 @@ def propose_once(cfg: Dict[str, Any], reason: str = "watchers", *, target: RepoW
     else:
         goal = f"{goal} [trigger:{reason}]"
     orch = Orchestrator(cfg)
-    res = orch.cycle(goal=goal)
+
+    retry_cfg = (cfg.get("initiative") or {}).get("retry", {})
+    attempts = int(retry_cfg.get("attempts", 3))
+    base_delay = float(retry_cfg.get("base_delay", 1.0))
+    backoff = float(retry_cfg.get("backoff", 2.0))
+
+    res = _retry(
+        lambda: orch.cycle(goal=goal),
+        attempts=max(1, attempts),
+        base_delay=base_delay,
+        backoff=max(1.0, backoff),
+    )
     st = _load_state()
     now = _now()
     st["last_proposal_ts"] = now

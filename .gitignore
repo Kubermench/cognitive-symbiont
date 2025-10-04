@@ -10,6 +10,7 @@ sandbox/.pytest_cache/
 
 # Local environments
 .venv/
+.env
 .DS_Store
 
 # Docker build output

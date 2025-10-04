@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, sqlite3, time
+import os, sqlite3, time, json
 from typing import List, Dict, Any
 
 SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
@@ -51,3 +51,26 @@ class MemoryDB:
         if not row:
             return None
         return {"episode_id": row[0], "summary": row[1], "updated_at": row[2]}
+
+    def add_sd_run(
+        self,
+        *,
+        goal: str,
+        label: str,
+        horizon: int,
+        timestep: float,
+        stats: Dict[str, Any],
+        plot_path: str | None,
+    ) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO sd_runs (goal, label, horizon, timestep, stats_json, plot_path) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    goal,
+                    label,
+                    int(horizon),
+                    float(timestep),
+                    json.dumps(stats),
+                    plot_path,
+                ),
+            )

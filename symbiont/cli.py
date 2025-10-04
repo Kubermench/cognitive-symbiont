@@ -1,4 +1,5 @@
 import os, json, typer, yaml, sqlite3, time, stat
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from rich import print as rprint
@@ -9,6 +10,9 @@ from .tools import repo_scan, scriptify
 from .llm.client import LLMClient
 from .initiative import daemon as initiative
 from .agents.mutation import MutationEngine, MutationIntent
+from .agents.registry import AgentRegistry, CrewRunner
+from .orchestration.graph import GraphSpec, GraphRunner
+from .orchestration.dynamics_weaver import run_dynamics_weaver
 from .agents.swarm import SwarmCoordinator
 from . import guards as guard_mod
 from .ports.oracle import QueryOracle
@@ -451,6 +455,191 @@ def swarm_merge_transcripts(config_path: str = "./configs/config.yaml"):
         )
         if variant.justification:
             rprint(f"  justification: {variant.justification}")
+
+
+@app.command()
+def crew_run(
+    crew: str,
+    goal: str = typer.Argument(..., help="Goal for the crew to address"),
+    config_path: str = "./configs/config.yaml",
+    crews_path: str = "./configs/crews.yaml",
+):
+    """Run a YAML-configured crew (researcher/planner/critic/etc.)."""
+
+    cfg = load_config(config_path)
+    crews_file = Path(crews_path)
+    if not crews_file.exists():
+        rprint(f"[red]Crew config not found:[/red] {crews_file}")
+        raise typer.Exit(1)
+
+    registry = AgentRegistry.from_yaml(crews_file)
+    db = MemoryDB(db_path=cfg["db_path"])
+    runner = CrewRunner(registry, cfg, db)
+    try:
+        artifact_path = runner.run(crew, goal)
+    except KeyError as exc:
+        rprint(f"[red]{exc}" )
+        raise typer.Exit(1)
+    rprint(f"[green]Crew {crew} finished.[/green] Transcript: {artifact_path}")
+
+
+@app.command()
+def dynamics_weaver(
+    goal: str,
+    config_path: str = "./configs/config.yaml",
+):
+    """Run the hybrid System Dynamics + ABM "Dynamics Weaver" foresight crew."""
+
+    cfg = load_config(config_path)
+    result = run_dynamics_weaver(goal, cfg)
+    rprint("[green]Dynamics Weaver completed.[/green]")
+    rprint(f"  goal: {result.goal}")
+    rprint(f"  risk_score: {result.risk_score:.3f}")
+    rprint(f"  artifact: {result.artifact_path}")
+    rprint(f"  sd_plot: {result.sd_results.get('plot_path')}")
+    rprint(f"  abm_plot: {result.abm_results.get('plot_path')}")
+
+
+@app.command()
+def run_graph(
+    graph: str,
+    goal: str = typer.Argument(..., help="Goal for the workflow"),
+    config_path: str = "./configs/config.yaml",
+):
+    """Execute a graph-based workflow defined in YAML."""
+
+    cfg = load_config(config_path)
+    graph_path = Path(graph)
+    if not graph_path.exists():
+        rprint(f"[red]Graph spec not found:[/red] {graph_path}")
+        raise typer.Exit(1)
+
+    try:
+        spec = GraphSpec.from_yaml(graph_path)
+    except Exception as exc:
+        rprint(f"[red]Failed to load graph:[/red] {exc}")
+        raise typer.Exit(1)
+
+    try:
+        registry = AgentRegistry.from_yaml(spec.crew_config)
+    except Exception as exc:
+        rprint(f"[red]Failed to load crew config:[/red] {exc}")
+        raise typer.Exit(1)
+
+    db = MemoryDB(db_path=cfg["db_path"])
+    runner = GraphRunner(spec, registry, cfg, db, graph_path=graph_path)
+    artifact = runner.run(goal)
+    rprint(f"[green]Graph completed.[/green] Transcript: {artifact}")
+
+
+@app.command()
+def graph_resume(
+    state: str,
+    config_path: str = "./configs/config.yaml",
+    graph: Optional[str] = typer.Option(None, "--graph", help="Optional graph spec path override"),
+):
+    """Resume a previously saved graph run from a state file."""
+
+    state_path = Path(state)
+    if not state_path.exists():
+        rprint(f"[red]State file not found:[/red] {state_path}")
+        raise typer.Exit(1)
+
+    try:
+        state_data = json.loads(state_path.read_text())
+    except Exception as exc:
+        rprint(f"[red]Invalid state file:[/red] {exc}")
+        raise typer.Exit(1)
+
+    goal = state_data.get("goal")
+    if not goal:
+        rprint("[red]State file missing goal")
+        raise typer.Exit(1)
+
+    graph_path_str = graph or state_data.get("graph_path")
+    if not graph_path_str:
+        rprint("[red]State file missing graph path. Pass --graph to resume.")
+        raise typer.Exit(1)
+    graph_path = Path(graph_path_str)
+
+    try:
+        spec = GraphSpec.from_yaml(graph_path)
+    except Exception as exc:
+        rprint(f"[red]Failed to load graph:[/red] {exc}")
+        raise typer.Exit(1)
+
+    crew_config = state_data.get("crew_config")
+    if crew_config:
+        crew_path = Path(crew_config)
+    else:
+        crew_path = spec.crew_config
+
+    try:
+        registry = AgentRegistry.from_yaml(crew_path)
+    except Exception as exc:
+        rprint(f"[red]Failed to load crew config:[/red] {exc}")
+        raise typer.Exit(1)
+
+    cfg = load_config(config_path)
+    db = MemoryDB(db_path=cfg["db_path"])
+    runner = GraphRunner(spec, registry, cfg, db, graph_path=graph_path)
+    artifact = runner.run(goal, resume_state=state_path)
+    rprint(f"[green]Graph resumed.[/green] Transcript: {artifact}")
+
+
+@app.command()
+def sd_runs(
+    limit: int = typer.Option(5, "--limit", help="Number of recent SD runs to display"),
+    goal: Optional[str] = typer.Option(None, "--goal", help="Filter results by goal substring"),
+    config_path: str = "./configs/config.yaml",
+):
+    """Show recent system-dynamics simulations recorded in telemetry."""
+
+    cfg = load_config(config_path)
+    db_path = cfg["db_path"]
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        if goal:
+            rows = conn.execute(
+                "SELECT goal, label, horizon, timestep, stats_json, plot_path, created_at "
+                "FROM sd_runs WHERE goal LIKE ? ORDER BY id DESC LIMIT ?",
+                (f"%{goal}%", limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT goal, label, horizon, timestep, stats_json, plot_path, created_at "
+                "FROM sd_runs ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+
+    if not rows:
+        rprint("[yellow]No system-dynamics runs recorded yet.[/yellow]")
+        raise typer.Exit()
+
+    for row in rows:
+        stats = {}
+        try:
+            stats = json.loads(row["stats_json"] or "{}")
+        except json.JSONDecodeError:
+            stats = {}
+        headline = []
+        for key in ("rogue", "autonomy", "latency"):
+            if key in stats and isinstance(stats[key], dict):
+                last_value = stats[key].get("last")
+                if isinstance(last_value, (int, float)):
+                    headline.append(f"{key}={last_value:.2f}")
+        created_at = row["created_at"] or 0
+        if created_at:
+            created_dt = datetime.fromtimestamp(created_at, timezone.utc)
+            created_label = created_dt.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            created_label = "—"
+        rprint(
+            f"[bold]{row['goal']}[/bold]\n"
+            f"  label={row['label']} horizon={row['horizon']} timestep={row['timestep']:.2f} at {created_label} UTC\n"
+            f"  plot={row['plot_path'] or '(none)'}\n"
+            f"  stats: {', '.join(headline) if headline else '(none)'}"
+        )
 
 
 @app.command()
