@@ -8,6 +8,7 @@ from .memory.db import MemoryDB
 from .memory import retrieval
 from .tools import repo_scan, scriptify
 from .llm.client import LLMClient
+from .llm.budget import TokenBudget
 from .initiative import daemon as initiative
 from .agents.mutation import MutationEngine, MutationIntent
 from .agents.registry import AgentRegistry, CrewRunner
@@ -134,8 +135,23 @@ def scan(path: str = "."):
         for c in s.get("commands",[]): rprint(f"    $ {c}")
 
 @app.command()
-def llmtest(prompt: str = "List 3 tiny refactors you can do in a repo in 10 minutes."):
-    cfg=load_config(); out=LLMClient(cfg.get("llm",{})).generate(prompt)
+def llmtest(
+    prompt: str = "List 3 tiny refactors you can do in a repo in 10 minutes.",
+    config_path: str = "./configs/config.yaml",
+):
+    cfg = load_config(config_path)
+    limit = 0
+    try:
+        limit = int(cfg.get("max_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    budget = TokenBudget(
+        limit=limit,
+        label="cli:llmtest",
+        sink_path=data_root / "token_budget" / "cli_llmtest.json",
+    )
+    out = LLMClient(cfg.get("llm", {})).generate(prompt, budget=budget, label="cli:llmtest")
     rprint(out if out.strip() else "[dim]No output (provider may be 'none').[/dim]")
 
 @app.command()
@@ -336,8 +352,26 @@ def script_diff(script: str, sandbox: str = typer.Option(None, "--sandbox", help
 
 
 @app.command()
-def guard(script: str = typer.Option(None, "--script", help="Path to script to analyse"), plan: str = typer.Option(None, "--plan", help="Path to plan markdown"), json_out: bool = typer.Option(False, "--json", help="Return machine readable output")):
+def guard(
+    script: str = typer.Option(None, "--script", help="Path to script to analyse"),
+    plan: str = typer.Option(None, "--plan", help="Path to plan markdown"),
+    json_out: bool = typer.Option(False, "--json", help="Return machine readable output"),
+    config_path: str = typer.Option("./configs/config.yaml", "--config-path", help="Path to config"),
+):
     """Run guard heuristics against scripts or plans."""
+
+    cfg = load_config(config_path)
+    limit = 0
+    try:
+        limit = int(cfg.get("max_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    budget = TokenBudget(
+        limit=limit,
+        label="cli:guard",
+        sink_path=data_root / "token_budget" / "cli_guard.json",
+    )
 
     report: Dict[str, Any] = {}
     if script:
@@ -345,7 +379,7 @@ def guard(script: str = typer.Option(None, "--script", help="Path to script to a
     if plan:
         plan_path = Path(plan)
         ptext = plan_path.read_text(encoding="utf-8") if plan_path.exists() else ""
-        plan_report = guard_mod.analyze_plan(ptext, cfg)
+        plan_report = guard_mod.analyze_plan(ptext, cfg, budget=budget)
         report.setdefault("plan", plan_report)
     if not report:
         rprint("[yellow]Nothing to analyse. Provide --script or --plan.")
@@ -600,6 +634,110 @@ def graph_resume(
 
 
 @app.command()
+def graph_handoff_complete(
+    state: str,
+    outcome: str = typer.Option(
+        "success",
+        "--outcome",
+        help="Outcome of the handoff (success, failure, block).",
+    ),
+    result: Optional[str] = typer.Option(
+        None,
+        "--result",
+        help="JSON string describing the resolved result payload",
+    ),
+    result_file: Optional[str] = typer.Option(
+        None,
+        "--result-file",
+        help="Path to a JSON file describing the resolved result payload",
+    ),
+    note: Optional[str] = typer.Option(None, "--note", help="Optional note to log with the resolution"),
+    config_path: str = "./configs/config.yaml",
+):
+    """Mark a pending graph handoff as resolved."""
+
+    state_path = Path(state)
+    if not state_path.exists():
+        rprint(f"[red]State file not found:[/red] {state_path}")
+        raise typer.Exit(1)
+
+    if result and result_file:
+        rprint("[red]Pass either --result or --result-file, not both.")
+        raise typer.Exit(1)
+
+    try:
+        state_data = json.loads(state_path.read_text())
+    except Exception as exc:
+        rprint(f"[red]Invalid state file:[/red] {exc}")
+        raise typer.Exit(1)
+
+    handoff = state_data.get("handoff")
+    if not handoff:
+        rprint("[red]No pending handoff recorded in this state file.")
+        raise typer.Exit(1)
+    if handoff.get("status") == "resolved":
+        rprint("[yellow]Handoff already resolved; nothing to do.")
+        raise typer.Exit()
+
+    if result_file:
+        payload_path = Path(result_file)
+        if not payload_path.exists():
+            rprint(f"[red]Result file not found:[/red] {payload_path}")
+            raise typer.Exit(1)
+        try:
+            result_payload = json.loads(payload_path.read_text())
+        except Exception as exc:
+            rprint(f"[red]Failed to parse result file:[/red] {exc}")
+            raise typer.Exit(1)
+    elif result:
+        try:
+            result_payload = json.loads(result)
+        except json.JSONDecodeError as exc:
+            rprint(f"[red]Invalid JSON in --result:[/red] {exc}")
+            raise typer.Exit(1)
+    else:
+        result_payload = {}
+
+    normalized_outcome = outcome.strip().lower()
+    if normalized_outcome not in {"success", "failure", "block"}:
+        rprint("[red]Outcome must be one of: success, failure, block")
+        raise typer.Exit(1)
+
+    handoff.update(
+        {
+            "status": "resolved",
+            "outcome": normalized_outcome,
+            "result": result_payload,
+            "resolved_at": int(time.time()),
+        }
+    )
+    if note:
+        handoff["note"] = note
+
+    state_data["handoff"] = handoff
+    state_data["awaiting_human"] = False
+    state_path.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+
+    cfg = load_config(config_path)
+    db = MemoryDB(db_path=cfg["db_path"])
+    task_id = handoff.get("task_id")
+    if task_id:
+        try:
+            db.update_task_status(
+                int(task_id),
+                status=normalized_outcome,
+                result=json.dumps(result_payload),
+            )
+        except Exception as exc:
+            rprint(f"[yellow]Warning:[/yellow] failed to update task #{task_id}: {exc}")
+
+    rprint(
+        f"[green]Handoff resolved[/green] with outcome '{normalized_outcome}'."
+        f" State updated at {state_path}"
+    )
+
+
+@app.command()
 def sd_runs(
     limit: int = typer.Option(5, "--limit", help="Number of recent SD runs to display"),
     goal: Optional[str] = typer.Option(None, "--goal", help="Filter results by goal substring"),
@@ -660,7 +798,18 @@ def query_web(prompt: str, limit: int = typer.Option(3, "--limit", help="Maximum
 
     cfg = load_config(config_path)
     oracle = QueryOracle(cfg)
-    results = oracle.run(prompt, limit=limit)
+    limit_value = 0
+    try:
+        limit_value = int(cfg.get("max_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        limit_value = 0
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    budget = TokenBudget(
+        limit=limit_value,
+        label="cli:oracle",
+        sink_path=data_root / "token_budget" / "cli_oracle.json",
+    )
+    results = oracle.run(prompt, limit=limit, budget=budget)
     if not results:
         rprint("[yellow]No oracle results (check allowlist or connectivity).")
         return
@@ -674,7 +823,18 @@ def peer_chat(prompt: str, simulate: bool = typer.Option(False, "--simulate", he
 
     cfg = load_config(config_path)
     bridge = AIPeerBridge(cfg)
-    transcript = bridge.chat(prompt, simulate_only=simulate)
+    limit = 0
+    try:
+        limit = int(cfg.get("max_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    budget = TokenBudget(
+        limit=limit,
+        label="cli:peer_chat",
+        sink_path=data_root / "token_budget" / "cli_peer_chat.json",
+    )
+    transcript = bridge.chat(prompt, simulate_only=simulate, budget=budget)
     mode = "simulation" if transcript.simulated else "live"
     rprint(f"[green]{mode} peer response saved:[/green] {transcript.path}")
     print(transcript.response)

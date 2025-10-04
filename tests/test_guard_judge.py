@@ -16,7 +16,7 @@ class DummyLLM:
         self.cfg = cfg
         self.calls = []
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, **kwargs) -> str:
         self.calls.append(prompt)
         return json.dumps({"risk": 0.7, "verdict": "high", "reasons": ["danger"]})
 
@@ -37,7 +37,7 @@ def test_analyze_plan_handles_bad_json(monkeypatch):
         def __init__(self, cfg):
             pass
 
-        def generate(self, prompt: str) -> str:
+        def generate(self, prompt: str, **kwargs) -> str:
             return "not-json"
 
     monkeypatch.setattr(guards, "LLMClient", lambda cfg: Noisy(cfg))

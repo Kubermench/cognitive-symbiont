@@ -163,6 +163,12 @@ def render_home(cfg: dict, db: MemoryDB):
                 ca = c.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
             st.markdown(f"**Memory**: episodes={ce} · artifacts={ca}")
 
+        data_root_value = cfg.get("data_root")
+        if data_root_value:
+            data_root = Path(data_root_value)
+        else:
+            data_root = Path(cfg["db_path"]).resolve().parent
+
         governance_data = _latest_governance_snapshot(cfg["db_path"])
         if governance_data:
             graph_path, snapshot = governance_data
@@ -215,6 +221,30 @@ def render_home(cfg: dict, db: MemoryDB):
                         st.caption(f"plot: {record['plot_path']}")
                     st.markdown("---")
 
+        token_dir = data_root / "token_budget"
+        if token_dir.exists():
+            snapshots = []
+            for path in sorted(token_dir.glob("*.json")):
+                try:
+                    snapshots.append(json.loads(path.read_text(encoding="utf-8")))
+                except Exception:
+                    continue
+            if snapshots:
+                latest = {snap.get("label", path.stem): snap for snap in snapshots}
+                total_limit = sum(snap.get("limit", 0) or 0 for snap in latest.values())
+                total_used = sum(snap.get("used", 0) or 0 for snap in latest.values())
+                st.markdown(
+                    f"**Token budgets:** used {total_used} / {total_limit or '∞'} across {len(latest)} trackers"
+                )
+            else:
+                configured_limit = cfg.get("max_tokens")
+                if configured_limit:
+                    st.markdown(f"**Token budget:** limit {configured_limit} (no usage recorded yet)")
+        else:
+            configured_limit = cfg.get("max_tokens")
+            if configured_limit:
+                st.markdown(f"**Token budget:** limit {configured_limit} (no usage recorded yet)")
+        
         paused_states = _paused_graph_states()
         if paused_states:
             with st.expander("Human-in-loop queue", expanded=False):
@@ -226,6 +256,87 @@ def render_home(cfg: dict, db: MemoryDB):
                 selected_path, state_data = labels[choice]
                 st.caption(f"Graph path: {state_data.get('graph_path','?')}")
                 st.caption(f"Next node: {state_data.get('current_node','END')}")
+                budget = state_data.get("token_budget") or {}
+                if budget:
+                    limit = budget.get("limit") or 0
+                    used = budget.get("used") or 0
+                    remaining = max(limit - used, 0) if limit else None
+                    event_count = len(budget.get("events") or [])
+                    limit_label = f"{limit}" if limit else "∞"
+                    if remaining is not None:
+                        st.caption(
+                            f"Token budget: {used}/{limit_label} used (remaining {remaining}, events {event_count})"
+                        )
+                    else:
+                        st.caption(
+                            f"Token budget: {used}/{limit_label} used (events {event_count})"
+                        )
+                    with st.expander("Token usage log", expanded=False):
+                        st.json(budget.get("events", [])[-5:])
+                handoff = state_data.get("handoff") or {}
+                if handoff:
+                    st.markdown("**Handoff status**")
+                    st.caption(
+                        f"Status: {handoff.get('status','?')} · Assignee: {handoff.get('assignee','-')}"
+                    )
+                    st.json({k: v for k, v in handoff.items() if k not in {"payload"}}, expanded=False)
+                    if handoff.get("status") == "pending":
+                        outcome = st.selectbox(
+                            "Outcome",
+                            options=["success", "failure", "block"],
+                            index=["success", "failure", "block"].index(
+                                handoff.get("outcome") or "success"
+                            ),
+                        )
+                        result_default = handoff.get("result") or {"verdict": "ok"}
+                        result_text = st.text_area(
+                            "Resolution JSON",
+                            value=json.dumps(result_default, indent=2),
+                            height=160,
+                            key=f"handoff_result_{selected_path.name}",
+                        )
+                        note_text = st.text_area(
+                            "Resolution note (optional)",
+                            value=handoff.get("note", ""),
+                            height=80,
+                            key=f"handoff_note_{selected_path.name}",
+                        )
+                        if st.button("Mark handoff resolved", key=f"resolve_{selected_path.name}"):
+                            try:
+                                result_payload = json.loads(result_text) if result_text.strip() else {}
+                            except json.JSONDecodeError as exc:
+                                st.error(f"Invalid resolution JSON: {exc}")
+                            else:
+                                handoff_update = dict(handoff)
+                                handoff_update.update(
+                                    {
+                                        "status": "resolved",
+                                        "outcome": outcome,
+                                        "result": result_payload,
+                                        "note": note_text or None,
+                                        "resolved_at": int(time.time()),
+                                    }
+                                )
+                                state_data["handoff"] = handoff_update
+                                state_data["awaiting_human"] = False
+                                try:
+                                    selected_path.write_text(
+                                        json.dumps(state_data, indent=2),
+                                        encoding="utf-8",
+                                    )
+                                    task_id = handoff_update.get("task_id")
+                                    if task_id:
+                                        try:
+                                            db.update_task_status(
+                                                int(task_id),
+                                                status=outcome,
+                                                result=json.dumps(result_payload),
+                                            )
+                                        except Exception as exc:
+                                            st.warning(f"Task update failed: {exc}")
+                                    st.success("Handoff marked resolved. You can now resume the graph.")
+                                except Exception as exc:
+                                    st.error(f"Failed to persist handoff resolution: {exc}")
                 if state_data.get("history"):
                     st.markdown("**Latest node**")
                     last_entry = state_data["history"][-1]

@@ -105,6 +105,6 @@ def test_ai_peer_chat_relays_when_not_stub(tmp_path, monkeypatch):
         "llm": {},
     }
     bridge = AIPeerBridge(cfg)
-    monkeypatch.setattr(bridge, "_relay", lambda prompt: "relayed")
+    monkeypatch.setattr(bridge, "_relay", lambda prompt, *, budget=None: "relayed")
     transcript = bridge.chat("Ping", simulate_only=False, agent_id=None)
     assert transcript.response == "relayed"

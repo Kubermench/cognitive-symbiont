@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from symbiont.llm.client import LLMClient
+from symbiont.llm.budget import TokenBudget
 
 RISK_PATTERNS = [
     (re.compile(r"rm\s+-rf\s+/"), 0.8, "Deletes root directory"),
@@ -56,7 +57,12 @@ def analyze_script(script_path: Path) -> Dict[str, any]:
     }
 
 
-def _judge_with_llm(plan_text: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _judge_with_llm(
+    plan_text: str,
+    cfg: Dict[str, Any],
+    *,
+    budget: Optional[TokenBudget] = None,
+) -> Dict[str, Any]:
     guard_cfg = (cfg.get("guard") or {})
     judge_cfg = guard_cfg.get("judge") or {}
     if not judge_cfg.get("enabled"):
@@ -75,7 +81,7 @@ Plan:\n{plan}\n""",
     prompt = prompt_template.format(plan=plan_text)
     client = LLMClient(llm_cfg)
     try:
-        raw = client.generate(prompt)
+        raw = client.generate(prompt, budget=budget, label="guard:judge")
     except Exception as exc:  # pragma: no cover - network specific
         return {"error": str(exc)}
 
@@ -103,7 +109,12 @@ Plan:\n{plan}\n""",
     return result
 
 
-def analyze_plan(plan_text: str, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def analyze_plan(
+    plan_text: str,
+    cfg: Optional[Dict[str, Any]] = None,
+    *,
+    budget: Optional[TokenBudget] = None,
+) -> Dict[str, Any]:
     flags: List[str] = []
     lowered = plan_text.lower()
     if "drop database" in lowered:
@@ -112,7 +123,7 @@ def analyze_plan(plan_text: str, cfg: Optional[Dict[str, Any]] = None) -> Dict[s
         flags.append("Touches production without referencing backups")
     report: Dict[str, Any] = {"flags": flags}
     if cfg:
-        judge_report = _judge_with_llm(plan_text, cfg)
+        judge_report = _judge_with_llm(plan_text, cfg, budget=budget)
         if judge_report:
             report["judge"] = judge_report
             flag = judge_report.get("flag")

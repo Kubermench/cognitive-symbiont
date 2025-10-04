@@ -30,13 +30,35 @@ class MemoryDB:
             rows = c.execute("SELECT id, role, content, created_at FROM messages ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [{"id":r[0],"role":r[1],"content":r[2],"ts":r[3]} for r in rows]
     
-    def add_task(self, episode_id: int, description: str, status: str, assignee_role: str):
+    def add_task(
+        self,
+        episode_id: int | None,
+        description: str,
+        status: str,
+        assignee_role: str,
+        *,
+        result: str | None = None,
+    ) -> int:
+        with self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO tasks (episode_id, description, status, assignee_role, result, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, strftime('%s','now'), strftime('%s','now'))",
+                (episode_id, description, status, assignee_role, result),
+            )
+            return int(cur.lastrowid)
+
+    def update_task_status(
+        self,
+        task_id: int,
+        *,
+        status: str,
+        result: str | None = None,
+    ) -> None:
         with self._conn() as c:
             c.execute(
-                "INSERT INTO tasks (episode_id, description, status, assignee_role, created_at) "
-                "VALUES (?, ?, ?, ?, strftime('%s','now'))",
-            (episode_id, description, status, assignee_role)
-        )
+                "UPDATE tasks SET status = ?, result = ?, updated_at = strftime('%s','now') WHERE id = ?",
+                (status, result, task_id),
+            )
 
     def add_intent(self, episode_id: int, summary: str):
         with self._conn() as c:

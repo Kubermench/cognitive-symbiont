@@ -6,6 +6,8 @@ import subprocess
 import time
 from typing import Dict, Optional
 
+from .budget import TokenBudget
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,28 +28,118 @@ class LLMClient:
         if self.mode in {"cloud", "hybrid"} and self.cloud_cfg:
             self._init_cloud_client()
 
-    def generate(self, prompt: str) -> str:
+    def generate(
+        self,
+        prompt: str,
+        *,
+        budget: Optional[TokenBudget] = None,
+        label: Optional[str] = None,
+    ) -> str:
+        label = label or "llm"
+        prompt_tokens = TokenBudget.estimate(prompt) if budget else 0
+
+        def attempt(
+            source: str,
+            provider: str,
+            model: str,
+            func,
+        ) -> str:
+            if budget and not budget.can_consume(prompt_tokens):
+                budget.note_denied(
+                    prompt_tokens=prompt_tokens,
+                    provider=provider,
+                    model=model,
+                    label=label,
+                    source=source,
+                )
+                return ""
+
+            start = time.monotonic()
+            output = func()
+            latency = time.monotonic() - start
+            response_tokens = TokenBudget.estimate(output) if budget else 0
+            if budget:
+                budget.log_attempt(
+                    prompt_tokens=prompt_tokens,
+                    response_tokens=response_tokens,
+                    provider=provider,
+                    model=model,
+                    label=label,
+                    source=source,
+                    outcome="ok",
+                    latency=latency,
+                )
+            return output
+
         # Hybrid mode chooses local vs cloud dynamically
         if self.mode == "cloud":
             self._refresh_cloud_client_if_needed()
-            primary = self._generate_cloud(prompt)
+            cloud_provider = self.cloud_cfg.get("provider", "cloud")
+            cloud_model = self.cloud_cfg.get("model", self.cloud_cfg.get("model_name", self.model))
+            primary = attempt(
+                "cloud",
+                cloud_provider,
+                cloud_model,
+                lambda: self._generate_cloud(prompt),
+            )
         elif self.mode == "hybrid":
             self._refresh_cloud_client_if_needed()
             if self._should_use_cloud(prompt):
-                primary = self._generate_cloud(prompt)
-                if not primary.strip():
-                    primary = self._dispatch(
-                        self.provider, self.model, self.cmd, prompt, timeout=self.timeout
-                    )
-            else:
-                primary = self._dispatch(
-                    self.provider, self.model, self.cmd, prompt, timeout=self.timeout
+                cloud_provider = self.cloud_cfg.get("provider", "cloud")
+                cloud_model = self.cloud_cfg.get("model", self.cloud_cfg.get("model_name", self.model))
+                primary = attempt(
+                    "cloud",
+                    cloud_provider,
+                    cloud_model,
+                    lambda: self._generate_cloud(prompt),
                 )
                 if not primary.strip():
-                    primary = self._generate_cloud(prompt)
+                    primary = attempt(
+                        "local",
+                        self.provider,
+                        self.model,
+                        lambda: self._dispatch(
+                            self.provider,
+                            self.model,
+                            self.cmd,
+                            prompt,
+                            timeout=self.timeout,
+                        ),
+                    )
+            else:
+                primary = attempt(
+                    "local",
+                    self.provider,
+                    self.model,
+                    lambda: self._dispatch(
+                        self.provider,
+                        self.model,
+                        self.cmd,
+                        prompt,
+                        timeout=self.timeout,
+                    ),
+                )
+                if not primary.strip():
+                    cloud_provider = self.cloud_cfg.get("provider", "cloud")
+                    cloud_model = self.cloud_cfg.get("model", self.cloud_cfg.get("model_name", self.model))
+                    primary = attempt(
+                        "cloud",
+                        cloud_provider,
+                        cloud_model,
+                        lambda: self._generate_cloud(prompt),
+                    )
         else:  # local only
-            primary = self._dispatch(
-                self.provider, self.model, self.cmd, prompt, timeout=self.timeout
+            primary = attempt(
+                "local",
+                self.provider,
+                self.model,
+                lambda: self._dispatch(
+                    self.provider,
+                    self.model,
+                    self.cmd,
+                    prompt,
+                    timeout=self.timeout,
+                ),
             )
 
         if primary and primary.strip():
@@ -66,7 +158,18 @@ class LLMClient:
         fallback_cmd = self.fallback_cfg.get("cmd", self.cmd)
         fallback_timeout = int(self.fallback_cfg.get("timeout_seconds", self.timeout))
 
-        return self._dispatch(fallback_provider, fallback_model, fallback_cmd, prompt, timeout=fallback_timeout)
+        return attempt(
+            "fallback",
+            fallback_provider,
+            fallback_model,
+            lambda: self._dispatch(
+                fallback_provider,
+                fallback_model,
+                fallback_cmd,
+                prompt,
+                timeout=fallback_timeout,
+            ),
+        )
 
     def _dispatch(
         self, provider: str, model: str, cmd: str, prompt: str, *, timeout: Optional[int]

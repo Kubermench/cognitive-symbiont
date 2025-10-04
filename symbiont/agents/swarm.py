@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import networkx as nx
 
 from ..llm.client import LLMClient
+from ..llm.budget import TokenBudget
 from ..memory.db import MemoryDB
 from ..memory import graphrag
 from ..ports.ai_peer import AIPeerBridge
@@ -46,14 +47,25 @@ class SwarmCoordinator:
         ensure_dirs([self.repo_root / "data" / "artifacts" / "ai_peer" / "processed"])
 
     # ------------------------------------------------------------------
-    def after_cycle(self, cycle_result: Dict[str, Any]) -> Optional[List[SwarmVariant]]:
+    def after_cycle(
+        self,
+        cycle_result: Dict[str, Any],
+        *,
+        budget: Optional[TokenBudget] = None,
+    ) -> Optional[List[SwarmVariant]]:
         if not self.enabled:
             return None
         last_action = (cycle_result.get("decision") or {}).get("action", "")
         if not last_action:
             return None
         belief_hint = f"Action: {last_action}"
-        winners = self.run(belief_hint, variants=self.variants, auto=True, apply=True)
+        winners = self.run(
+            belief_hint,
+            variants=self.variants,
+            auto=True,
+            apply=True,
+            budget=budget,
+        )
         # Also merge any outstanding transcripts (e.g., from manual peer chats)
         self.merge_from_transcripts()
         return winners
@@ -66,22 +78,29 @@ class SwarmCoordinator:
         variants: int | None = None,
         auto: bool = False,
         apply: bool = True,
+        budget: Optional[TokenBudget] = None,
     ) -> List[SwarmVariant]:
         variants = variants or self.variants
         self.db.ensure_schema()
-        seed = self._ensure_seed_triple(belief_text, auto)
+        seed = self._ensure_seed_triple(belief_text, auto, budget=budget)
         if not seed:
             return []
 
-        forks = self._fork_variants(seed, variants)
-        scored = self._score_variants(forks)
+        forks = self._fork_variants(seed, variants, budget=budget)
+        scored = self._score_variants(forks, budget=budget)
         winners = self._merge_variants(scored)
         if winners and apply:
-            self._apply_winners(winners, seed)
+            self._apply_winners(winners, seed, budget=budget)
         return winners
 
     # ------------------------------------------------------------------
-    def _ensure_seed_triple(self, belief_text: str, auto: bool) -> Optional[Dict[str, str]]:
+    def _ensure_seed_triple(
+        self,
+        belief_text: str,
+        auto: bool,
+        *,
+        budget: Optional[TokenBudget] = None,
+    ) -> Optional[Dict[str, str]]:
         belief_text = (belief_text or "").strip()
         if belief_text.startswith("belief:"):
             belief_text = belief_text[len("belief:"):].strip()
@@ -103,7 +122,11 @@ class SwarmCoordinator:
         prompt = (
             "Interpret the text into a belief triple as JSON {subject, relation, object}.\n" + belief_text
         )
-        raw = self.llm.generate(prompt) or "{}"
+        raw = self.llm.generate(
+            prompt,
+            budget=budget,
+            label="swarm:seed",
+        ) or "{}"
         try:
             data = json.loads(raw)
             if {"subject", "relation", "object"} <= data.keys():
@@ -116,14 +139,24 @@ class SwarmCoordinator:
             pass
         return None
 
-    def _fork_variants(self, seed: Dict[str, str], n: int) -> List[Dict[str, str]]:
+    def _fork_variants(
+        self,
+        seed: Dict[str, str],
+        n: int,
+        *,
+        budget: Optional[TokenBudget] = None,
+    ) -> List[Dict[str, str]]:
         base = json.dumps(seed)
         prompt = (
             "You are coordinating a swarm of planner agents. Starting belief: "
             f"{base}. Produce {n} variant triples as JSON list.\n"
             "Each triple must be concise and developer-focused."
         )
-        raw = self.llm.generate(prompt) or "[]"
+        raw = self.llm.generate(
+            prompt,
+            budget=budget,
+            label="swarm:fork",
+        ) or "[]"
         try:
             data = json.loads(raw)
             variants = [
@@ -138,7 +171,12 @@ class SwarmCoordinator:
         except Exception:
             return [seed]
 
-    def _score_variants(self, variants: Iterable[Dict[str, str]]) -> List[SwarmVariant]:
+    def _score_variants(
+        self,
+        variants: Iterable[Dict[str, str]],
+        *,
+        budget: Optional[TokenBudget] = None,
+    ) -> List[SwarmVariant]:
         scored: List[SwarmVariant] = []
         for variant in variants:
             agent_id = uuid.uuid4().hex
@@ -146,7 +184,12 @@ class SwarmCoordinator:
                 "Rate this dev belief triple from 0-1 (float). Respond as JSON {score, justification}.\n"
                 f"Triple: {variant}\nAgent-ID: {agent_id}"
             )
-            transcript = self.peer.chat(message, simulate_only=False, agent_id=agent_id)
+            transcript = self.peer.chat(
+                message,
+                simulate_only=False,
+                agent_id=agent_id,
+                budget=budget,
+            )
             try:
                 payload = json.loads(transcript.response)
                 score = float(payload.get("score", 0.0))
@@ -225,7 +268,13 @@ class SwarmCoordinator:
                 score += 0.33
         return min(score, 1.0)
 
-    def _apply_winners(self, winners: List[SwarmVariant], seed: Dict[str, str]) -> None:
+    def _apply_winners(
+        self,
+        winners: List[SwarmVariant],
+        seed: Dict[str, str],
+        *,
+        budget: Optional[TokenBudget] = None,
+    ) -> None:
         with self.db._conn() as conn:
             total_claims = conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] or 1
         max_updates = max(1, int(total_claims * self.max_delta_ratio))
@@ -246,9 +295,15 @@ class SwarmCoordinator:
             )
             applied += 1
 
-        self._write_artifact(seed, winners)
+        self._write_artifact(seed, winners, budget=budget)
 
-    def _write_artifact(self, seed: Dict[str, str], winners: List[SwarmVariant]) -> None:
+    def _write_artifact(
+        self,
+        seed: Dict[str, str],
+        winners: List[SwarmVariant],
+        *,
+        budget: Optional[TokenBudget] = None,
+    ) -> None:
         artifacts_dir = self.repo_root / "data" / "artifacts" / "swarm"
         ensure_dirs([artifacts_dir])
         path = artifacts_dir / f"swarm_{int(time.time())}.json"
@@ -268,7 +323,7 @@ class SwarmCoordinator:
 
         # basic governance check on descriptions
         plan_text = json.dumps(payload)
-        report = analyze_plan(plan_text, self.config)
+        report = analyze_plan(plan_text, self.config, budget=budget)
         if report.get("flags"):
             path.write_text(
                 path.read_text(encoding="utf-8")
@@ -318,7 +373,7 @@ class SwarmCoordinator:
 
         winners = self._merge_variants(scored)
         if winners:
-            self._apply_winners(winners, winners[0].triple)
+            self._apply_winners(winners, winners[0].triple, budget=None)
         return winners
 
     # ------------------------------------------------------------------

@@ -3,6 +3,7 @@ from typing import Dict, Any, List
 from .base_agent import BaseAgent
 from ..tools import repo_scan
 from ..llm.client import LLMClient
+from ..llm.budget import TokenBudget
 from ..memory import retrieval
 import os, json, re
 
@@ -13,12 +14,14 @@ class SubSelf(BaseAgent):
         config: Dict[str, Any],
         *,
         llm_client: LLMClient | None = None,
+        token_budget: TokenBudget | None = None,
     ):
         self.role = role
         self.name = role.get("name", "anon")
         self.goal = role.get("goal", "")
         self.style = role.get("style", "")
         self.llm = llm_client or LLMClient((config or {}).get("llm", {}))
+        self.token_budget = token_budget
 
     def run(self, context: Dict[str, Any], memory) -> Dict[str, Any]:
         goal = context.get("goal","")
@@ -59,7 +62,15 @@ class SubSelf(BaseAgent):
             heur.append(f"{s['title']} — {s['details']}{cmd}")
         next_step = f"Apply 3 quick refactors: {', '.join([s['title'] for s in top[:3]])}" if top else "No obvious quick refactors; run scan"
         prompt = self._bullets_prompt(goal, top)
-        llm_out = self.llm.generate(prompt) if prompt else ""
+        llm_out = (
+            self.llm.generate(
+                prompt,
+                budget=self.token_budget,
+                label=f"{self.name}:bullets",
+            )
+            if prompt
+            else ""
+        )
         parsed: List[str] = []
         if llm_out:
             for ln in llm_out.splitlines():

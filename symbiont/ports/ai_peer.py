@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from ..llm.client import LLMClient
+from ..llm.budget import TokenBudget
 from ..tools.files import ensure_dirs
 
 
@@ -30,12 +31,19 @@ class AIPeerBridge:
         ensure_dirs([self.transcripts_dir])
         self.llm = LLMClient(self.config.get("llm", {}))
 
-    def chat(self, prompt: str, simulate_only: bool = False, agent_id: Optional[str] = None) -> PeerTranscript:
+    def chat(
+        self,
+        prompt: str,
+        *,
+        simulate_only: bool = False,
+        agent_id: Optional[str] = None,
+        budget: Optional[TokenBudget] = None,
+    ) -> PeerTranscript:
         simulated = self.stub_mode or simulate_only
         if simulated:
-            reply = self._simulate(prompt)
+            reply = self._simulate(prompt, budget=budget)
         else:
-            reply = self._relay(prompt)
+            reply = self._relay(prompt, budget=budget)
         path = self._store(prompt, reply, simulated, agent_id)
         return PeerTranscript(
             prompt=prompt,
@@ -45,17 +53,21 @@ class AIPeerBridge:
             agent_id=agent_id,
         )
 
-    def _simulate(self, prompt: str) -> str:
+    def _simulate(self, prompt: str, *, budget: Optional[TokenBudget] = None) -> str:
         guidance = (
             "You are an AI pair-programmer offering concise advice."
             " Respond in under 120 words with numbered steps if actionable."
         )
-        return self.llm.generate(f"{guidance}\nPrompt: {prompt}")
+        return self.llm.generate(
+            f"{guidance}\nPrompt: {prompt}",
+            budget=budget,
+            label="peer:simulate",
+        )
 
-    def _relay(self, prompt: str) -> str:
+    def _relay(self, prompt: str, *, budget: Optional[TokenBudget] = None) -> str:
         # Placeholder for future external API integration.
         # For now we reuse simulation to guarantee deterministic behaviour.
-        return self._simulate(prompt)
+        return self._simulate(prompt, budget=budget)
 
     def _store(self, prompt: str, reply: str, simulated: bool, agent_id: Optional[str]) -> Path:
         ts = int(time.time())
