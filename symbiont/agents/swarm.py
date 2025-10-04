@@ -4,6 +4,7 @@ import ast
 import json
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -23,6 +24,7 @@ class SwarmVariant:
     triple: Dict[str, str]
     score: float
     justification: str
+    agent_id: str = ""
 
 
 class SwarmCoordinator:
@@ -139,11 +141,12 @@ class SwarmCoordinator:
     def _score_variants(self, variants: Iterable[Dict[str, str]]) -> List[SwarmVariant]:
         scored: List[SwarmVariant] = []
         for variant in variants:
+            agent_id = uuid.uuid4().hex
             message = (
                 "Rate this dev belief triple from 0-1 (float). Respond as JSON {score, justification}.\n"
-                f"Triple: {variant}"
+                f"Triple: {variant}\nAgent-ID: {agent_id}"
             )
-            transcript = self.peer.chat(message, simulate_only=False)
+            transcript = self.peer.chat(message, simulate_only=False, agent_id=agent_id)
             try:
                 payload = json.loads(transcript.response)
                 score = float(payload.get("score", 0.0))
@@ -151,7 +154,14 @@ class SwarmCoordinator:
             except Exception:
                 score = 0.0
                 justification = transcript.response.strip()[:200]
-            scored.append(SwarmVariant(triple=variant, score=max(0.0, min(score, 1.0)), justification=justification))
+            scored.append(
+                SwarmVariant(
+                    triple=variant,
+                    score=max(0.0, min(score, 1.0)),
+                    justification=justification,
+                    agent_id=agent_id,
+                )
+            )
             self._archive_transcript(Path(transcript.path))
         return scored
 
@@ -162,7 +172,12 @@ class SwarmCoordinator:
         graph = nx.Graph()
         for i, variant in enumerate(scored):
             node_id = f"v{i}"
-            graph.add_node(node_id, triple=variant.triple, score=variant.score)
+            graph.add_node(
+                node_id,
+                triple=variant.triple,
+                score=variant.score,
+                agent_id=variant.agent_id,
+            )
 
         for i in range(len(scored)):
             for j in range(i + 1, len(scored)):
@@ -185,10 +200,21 @@ class SwarmCoordinator:
                 continue
             triple = attrs["triple"]
             justification = next(
-                (variant.justification for variant in scored if variant.triple == triple),
+                (
+                    variant.justification
+                    for variant in scored
+                    if variant.triple == triple and variant.agent_id == attrs.get("agent_id")
+                ),
                 "",
             )
-            winners.append(SwarmVariant(triple=triple, score=attrs["score"], justification=justification))
+            winners.append(
+                SwarmVariant(
+                    triple=triple,
+                    score=attrs["score"],
+                    justification=justification,
+                    agent_id=str(attrs.get("agent_id", "")),
+                )
+            )
 
         return winners
 
@@ -229,7 +255,12 @@ class SwarmCoordinator:
         payload = {
             "seed": seed,
             "winners": [
-                {"triple": w.triple, "score": w.score, "justification": w.justification}
+                {
+                    "triple": w.triple,
+                    "score": w.score,
+                    "justification": w.justification,
+                    "agent_id": w.agent_id,
+                }
                 for w in winners
             ],
         }
@@ -280,6 +311,7 @@ class SwarmCoordinator:
                     triple={k: str(v).strip() for k, v in triple.items()},
                     score=max(0.0, min(score, 1.0)),
                     justification=justification,
+                    agent_id=str(payload.get("agent_id") or uuid.uuid4().hex),
                 )
             )
             self._archive_transcript(path)

@@ -52,6 +52,7 @@ llm:
         path: .env
         key: OPENAI_API_KEY
     timeout_seconds: 30
+    refresh_seconds: 3600
 ports:
   oracle:
     allowlist:

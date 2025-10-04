@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -79,6 +80,55 @@ def test_llmclient_hybrid_escalates_to_cloud(monkeypatch):
 
     assert result == "cloud-response"
     assert dummy_cloud.calls == ["any prompt"]
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+
+def test_llmclient_refreshes_cloud_credentials(monkeypatch):
+    class DummyCloud:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, prompt: str) -> str:
+            self.calls.append(prompt)
+            return "cloud"
+
+    dummy_cloud = DummyCloud()
+    init_calls = []
+    real_monotonic = time.monotonic
+
+    def fake_init(self):
+        init_calls.append("init")
+        self._cloud_client = dummy_cloud
+        self._cloud_last_refresh = real_monotonic()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "value")
+    monkeypatch.setattr(LLMClient, "_init_cloud_client", fake_init)
+    monkeypatch.setattr(LLMClient, "_should_use_cloud", lambda self, prompt: True)
+
+    cfg = {
+        "provider": "ollama",
+        "model": "phi3:mini",
+        "mode": "hybrid",
+        "cloud": {
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key_env": "OPENAI_API_KEY",
+            "refresh_seconds": 1,
+        },
+    }
+
+    client = LLMClient(cfg)
+    assert init_calls == ["init"]
+
+    client.generate("first")
+    assert dummy_cloud.calls == ["first"]
+
+    client._cloud_last_refresh -= 5
+    client.generate("second")
+
+    assert dummy_cloud.calls == ["first", "second"]
+    assert init_calls.count("init") == 2
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
