@@ -56,6 +56,7 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
 - **Dynamics Weaver (hybrid SD+ABM)**: `python -m symbiont.cli dynamics-weaver "Model rogue drift in swarm"` runs the new hybrid crew that couples the macro SD engine with an agent-based noise layer. Results (plots + JSON) live under `data/artifacts/crews/dynamics_weaver/` and the summary appears both in the CLI output and the SD telemetry tables.
 - **Rotating credentials & peer identities**: cloud LLM keys reload automatically (configurable `refresh_seconds`, default 1h) and swarm peers now carry UUIDs so governance logs can trace each agent’s input without long-lived secrets.
 - **Pub/Sub hooks for initiative**: enable `initiative.pubsub` in `configs/config.yaml` to broadcast daemon events (memory JSONL or Redis) so distributed watchers can react without polling.
+- **Human-in-loop graph controls**: set `ui.pause_between_nodes=true` to pause crews between nodes; edit the pending state in BigKit’s dashboard and resume the graph directly from the UI.
 
 ### Commands
 - Graph claims:

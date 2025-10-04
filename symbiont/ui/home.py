@@ -7,6 +7,8 @@ from symbiont.memory import retrieval
 from symbiont.tools import scriptify, repo_scan
 from symbiont.initiative import daemon as initiative
 from symbiont.ports import browser as browser_port
+from symbiont.agents.registry import AgentRegistry
+from symbiont.orchestration.graph import GraphSpec, GraphRunner
 
 
 def _rel(ts: int) -> str:
@@ -98,6 +100,26 @@ def _sd_runs_history(db_path: str, limit: int = 5):
         record["stats"] = stats
         history.append(record)
     return history
+
+
+def _paused_graph_states(limit: int = 20):
+    states_dir = Path("data/evolution")
+    if not states_dir.exists():
+        return []
+    entries = sorted(
+        (p for p in states_dir.glob("graph_state_*.json") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    paused = []
+    for path in entries[:limit]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("awaiting_human"):
+            paused.append((path, data))
+    return paused
 
 
 def render_home(cfg: dict, db: MemoryDB):
@@ -192,6 +214,54 @@ def render_home(cfg: dict, db: MemoryDB):
                     if record.get("plot_path") and Path(record["plot_path"]).exists():
                         st.caption(f"plot: {record['plot_path']}")
                     st.markdown("---")
+
+        paused_states = _paused_graph_states()
+        if paused_states:
+            with st.expander("Human-in-loop queue", expanded=False):
+                labels = {
+                    f"{path.name} — {data.get('goal', '(no goal)')}": (path, data)
+                    for path, data in paused_states
+                }
+                choice = st.selectbox("Select a paused graph", list(labels.keys()))
+                selected_path, state_data = labels[choice]
+                st.caption(f"Graph path: {state_data.get('graph_path','?')}")
+                st.caption(f"Next node: {state_data.get('current_node','END')}")
+                if state_data.get("history"):
+                    st.markdown("**Latest node**")
+                    last_entry = state_data["history"][-1]
+                    st.json(last_entry, expanded=False)
+                    default_text = json.dumps(last_entry.get("result", {}), indent=2)
+                    edited = st.text_area(
+                        "Edit latest result JSON",
+                        value=default_text,
+                        height=220,
+                        key=f"edit_{selected_path.name}"
+                    )
+                    if st.button("Save edits", key=f"save_{selected_path.name}"):
+                        try:
+                            new_result = json.loads(edited)
+                        except json.JSONDecodeError as exc:
+                            st.error(f"Invalid JSON: {exc}")
+                        else:
+                            state_data["history"][-1]["result"] = new_result
+                            selected_path.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+                            st.success("Saved edits.")
+                if st.button("Resume graph", key=f"resume_{selected_path.name}"):
+                    try:
+                        graph_path = Path(state_data.get("graph_path") or "")
+                        spec = GraphSpec.from_yaml(graph_path)
+                        crew_cfg = Path(state_data.get("crew_config") or spec.crew_config)
+                        registry = AgentRegistry.from_yaml(crew_cfg)
+                        runner = GraphRunner(spec, registry, cfg, db, graph_path=graph_path)
+                        result = runner.run(state_data.get("goal", ""), resume_state=selected_path)
+                        if isinstance(result, dict) and result.get("status") == "paused":
+                            st.warning(
+                                f"Paused again at node {result.get('last_node','?')}."
+                            )
+                        else:
+                            st.success(f"Graph completed. Transcript: {result}")
+                    except Exception as exc:
+                        st.error(f"Failed to resume graph: {exc}")
 
         st.subheader("Take an action")
         st.caption("Choose what you need right now. Symbiont handles the technical work and keeps a full paper trail.")

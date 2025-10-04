@@ -528,8 +528,14 @@ def run_graph(
 
     db = MemoryDB(db_path=cfg["db_path"])
     runner = GraphRunner(spec, registry, cfg, db, graph_path=graph_path)
-    artifact = runner.run(goal)
-    rprint(f"[green]Graph completed.[/green] Transcript: {artifact}")
+    result = runner.run(goal)
+    if isinstance(result, dict) and result.get("status") == "paused":
+        rprint(
+            f"[yellow]Graph paused[/yellow] at node {result.get('last_node', '?')} — awaiting human input."
+            f" State saved to: {result.get('state')}"
+        )
+        return
+    rprint(f"[green]Graph completed.[/green] Transcript: {result}")
 
 
 @app.command()
@@ -583,8 +589,14 @@ def graph_resume(
     cfg = load_config(config_path)
     db = MemoryDB(db_path=cfg["db_path"])
     runner = GraphRunner(spec, registry, cfg, db, graph_path=graph_path)
-    artifact = runner.run(goal, resume_state=state_path)
-    rprint(f"[green]Graph resumed.[/green] Transcript: {artifact}")
+    result = runner.run(goal, resume_state=state_path)
+    if isinstance(result, dict) and result.get("status") == "paused":
+        rprint(
+            f"[yellow]Graph paused[/yellow] at node {result.get('last_node', '?')} — awaiting human input."
+            f" State saved to: {result.get('state')}"
+        )
+        return
+    rprint(f"[green]Graph resumed.[/green] Transcript: {result}")
 
 
 @app.command()

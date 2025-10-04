@@ -90,3 +90,4 @@ autopilot:
 ui:
   confirm_intent: false
   beginner_mode: true
+  pause_between_nodes: false
