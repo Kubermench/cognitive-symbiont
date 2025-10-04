@@ -40,7 +40,13 @@ class Orchestrator:
             or Path(self.config.get("db_path", "./data/symbiont.db")).parent
         )
         sink_path = data_root / "token_budget" / f"cycle_{eid}.json"
-        budget = TokenBudget(limit=limit, label=f"cycle:{eid}", sink_path=sink_path)
+        history_path = sink_path.parent / "history.jsonl"
+        budget = TokenBudget(
+            limit=limit,
+            label=f"cycle:{eid}",
+            sink_path=sink_path,
+            history_path=history_path,
+        )
         ctx["token_budget"] = budget
         subselves = [SubSelf(role=r, config=self.config, token_budget=budget) for r in self.roles]
 

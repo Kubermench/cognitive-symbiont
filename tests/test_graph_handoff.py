@@ -10,6 +10,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+import threading
+import time
+
 from symbiont.orchestration.graph import GraphSpec, GraphRunner
 from symbiont.agents.registry import AgentRegistry
 from symbiont.memory.db import MemoryDB
@@ -61,7 +64,16 @@ graph:
 
     spec = GraphSpec.from_yaml(graph_yaml)
     registry = AgentRegistry.from_yaml(crews_yaml)
-    cfg = {"db_path": str(tmp_path / "sym.db")}
+    cfg = {
+        "db_path": str(tmp_path / "sym.db"),
+        "notifications": {
+            "handoff_webhook_url": "https://example.com/handoff",
+            "retry_attempts": 1,
+            "retry_backoff_seconds": 0.01,
+            "allow_domains": ["example.com"],
+            "log_path": str(tmp_path / "handoff_log.jsonl"),
+        },
+    }
     db = MemoryDB(cfg["db_path"])
     db.ensure_schema()
     runner = GraphRunner(
@@ -172,3 +184,34 @@ def test_graph_handoff_resolution_and_resume(handoff_environment, monkeypatch):
 
     assert calls.count("handoff_agent") == 1
     assert "finisher" in calls
+
+
+def test_handoff_webhook_retries(handoff_environment, monkeypatch):
+    env = handoff_environment
+    runner = env["runner"]
+    cfg = env["cfg"]
+
+    posted: list = []
+    signal = threading.Event()
+
+    def fake_post(url, json=None, timeout=None):
+        posted.append((url, json))
+        signal.set()
+        class Dummy:
+            status_code = 200
+        return Dummy()
+
+    monkeypatch.setattr("symbiont.orchestration.graph.requests.post", fake_post)
+
+    result = runner.run("Webhook goal")
+    assert isinstance(result, dict) and result["status"] == "handoff_pending"
+
+    signal.wait(timeout=1.0)
+    assert posted, "Webhook should have been invoked"
+
+    log_path = Path(cfg["notifications"]["log_path"])
+    # Allow thread to write log
+    time.sleep(0.05)
+    assert log_path.exists()
+    log_entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(entry.get("status") == "success" for entry in log_entries)

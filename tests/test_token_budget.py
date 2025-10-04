@@ -1,7 +1,6 @@
+import json
 import sys
 from pathlib import Path
-
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -49,3 +48,24 @@ def test_token_budget_denies_when_limit_reached(monkeypatch):
     assert budget.events
     assert budget.events[-1]["outcome"] == "denied"
     assert budget.used == 0
+
+
+def test_token_budget_history(tmp_path):
+    sink = tmp_path / "budget.json"
+    history = tmp_path / "history.jsonl"
+    budget = TokenBudget(limit=100, label="hist", sink_path=sink, history_path=history)
+    budget.log_attempt(
+        prompt_tokens=10,
+        response_tokens=5,
+        provider="ollama",
+        model="phi3:mini",
+        label="hist",
+        source="test",
+        outcome="ok",
+        latency=0.05,
+    )
+
+    assert sink.exists()
+    assert history.exists()
+    lines = [json.loads(line) for line in history.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert lines and lines[0]["label"] == "hist"
