@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from symbiont.llm.client import LLMClient
+from symbiont.llm.budget import TokenBudget
 from symbiont.orchestration.graph import GraphSpec
 from symbiont.ports.ai_peer import AIPeerBridge
 
@@ -108,3 +109,28 @@ def test_ai_peer_chat_relays_when_not_stub(tmp_path, monkeypatch):
     monkeypatch.setattr(bridge, "_relay", lambda prompt, *, budget=None: "relayed")
     transcript = bridge.chat("Ping", simulate_only=False, agent_id=None)
     assert transcript.response == "relayed"
+
+
+def test_ai_peer_chat_uses_budget(tmp_path, monkeypatch):
+    cfg = {
+        "data_root": str(tmp_path),
+        "ports": {"ai_peer": {"stub_mode": True}},
+        "llm": {},
+    }
+    bridge = AIPeerBridge(cfg)
+    budget = TokenBudget(limit=50, label="peer-test")
+    monkeypatch.setattr(bridge.llm, "_should_use_cloud", lambda self, prompt: False)
+
+    def fake_dispatch(self, provider, model, cmd, prompt, timeout):
+        return "advisor"
+
+    monkeypatch.setattr(
+        bridge.llm,
+        "_dispatch",
+        fake_dispatch.__get__(bridge.llm, type(bridge.llm)),
+    )
+
+    transcript = bridge.chat("How to refactor?", simulate_only=True, budget=budget)
+
+    assert transcript.response == "advisor"
+    assert budget.events

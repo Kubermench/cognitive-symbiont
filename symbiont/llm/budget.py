@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import json
+import threading
 
 
 def _estimate_tokens(text: str) -> int:
@@ -23,6 +24,12 @@ class TokenBudget:
     used: int = 0
     events: List[Dict[str, Any]] = field(default_factory=list)
     sink_path: Optional[Path] = None
+    history_path: Optional[Path] = None
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.sink_path and not self.history_path:
+            self.history_path = self.sink_path.parent / "history.jsonl"
 
     def remaining(self) -> Optional[int]:
         if self.limit <= 0:
@@ -60,8 +67,10 @@ class TokenBudget:
             "latency_seconds": round(latency, 3),
             "remaining": self.remaining(),
         }
-        self.events.append(event)
-        self._write_snapshot()
+        with self._lock:
+            self.events.append(event)
+            self._write_snapshot()
+            self._append_history(event)
 
     def note_denied(self, *, prompt_tokens: int, provider: str, model: str, label: str, source: str) -> None:
         self.log_attempt(
@@ -101,5 +110,17 @@ class TokenBudget:
         try:
             self.sink_path.parent.mkdir(parents=True, exist_ok=True)
             self.sink_path.write_text(json.dumps(self.snapshot(), indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _append_history(self, event: Dict[str, Any]) -> None:
+        if not self.history_path:
+            return
+        entry = dict(event)
+        entry.setdefault("label", self.label)
+        try:
+            self.history_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.history_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry) + "\n")
         except Exception:
             pass

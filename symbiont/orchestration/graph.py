@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
+from urllib.parse import urlparse
 
 import yaml
+import requests
 
 from ..agents.registry import AgentRegistry
 from ..agents.subself import SubSelf
@@ -131,7 +134,13 @@ class GraphRunner:
         if self.graph_path:
             budget_label = f"graph:{self.graph_path.stem}"
         sink_path = data_root / "token_budget" / f"{budget_label}.json"
-        self.token_budget = TokenBudget(limit=limit, label=budget_label, sink_path=sink_path)
+        history_path = sink_path.parent / "history.jsonl"
+        self.token_budget = TokenBudget(
+            limit=limit,
+            label=budget_label,
+            sink_path=sink_path,
+            history_path=history_path,
+        )
 
         if resume_state:
             state = json.loads(resume_state.read_text())
@@ -148,6 +157,7 @@ class GraphRunner:
             self.current_handoff = state.get("handoff") or None
             self.token_budget.restore(state.get("token_budget"))
             self.token_budget.sink_path = sink_path
+            self.token_budget.history_path = history_path
             if self.current_handoff and self.current_handoff.get("status") != "resolved":
                 return {
                     "status": "handoff_pending",
@@ -716,6 +726,35 @@ class GraphRunner:
         url = notif_cfg.get("handoff_webhook_url")
         if not url:
             return
+
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            logger.warning("Skipping handoff webhook: invalid URL '%s'", url)
+            return
+
+        allow_domains = notif_cfg.get("allow_domains") or []
+        if allow_domains:
+            domain = parsed.netloc.lower()
+            allow_set = {d.lower() for d in allow_domains}
+            if domain not in allow_set:
+                logger.warning("Skipping handoff webhook: domain '%s' not in allow list", domain)
+                return
+
+        max_attempts = max(1, int(notif_cfg.get("retry_attempts", 3) or 3))
+        backoff = max(0.5, float(notif_cfg.get("retry_backoff_seconds", 2.0) or 2.0))
+        timeout = float(notif_cfg.get("timeout_seconds", 5.0) or 5.0)
+
+        if isinstance(self.cfg, dict):
+            data_root = Path(
+                self.cfg.get("data_root")
+                or Path(self.cfg.get("db_path", "./data/symbiont.db")).parent
+            )
+        else:
+            data_root = Path("data")
+
+        log_path_cfg = notif_cfg.get("log_path")
+        log_path = Path(log_path_cfg).expanduser() if log_path_cfg else data_root / "logs" / "handoff_notifications.jsonl"
+
         payload = {
             "goal": handoff.get("description"),
             "node": handoff.get("node"),
@@ -724,13 +763,43 @@ class GraphRunner:
             "state": handoff.get("status"),
             "created_at": handoff.get("created_at"),
             "task_id": handoff.get("task_id"),
+            "timestamp": int(time.time()),
         }
-        try:
-            import requests
 
-            requests.post(url, json=payload, timeout=float(notif_cfg.get("timeout_seconds", 5)))
-        except Exception:
-            logger.debug("Failed to dispatch handoff webhook", exc_info=True)
+        def _write_log(status: str, message: Optional[str] = None) -> None:
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                entry = dict(payload)
+                entry["status"] = status
+                if message:
+                    entry["message"] = message
+                with log_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(entry) + "\n")
+            except Exception:
+                logger.debug("Failed writing handoff notification log", exc_info=True)
+
+        def sender() -> None:
+            last_exc: Optional[Exception] = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    requests.post(url, json=payload, timeout=timeout)
+                    _write_log("success")
+                    return
+                except Exception as exc:  # pragma: no cover - network behaviour
+                    last_exc = exc
+                    logger.warning(
+                        "Handoff webhook attempt %s/%s failed: %s",
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
+                    if attempt < max_attempts:
+                        time.sleep(backoff * attempt)
+            if last_exc:
+                _write_log("failure", str(last_exc))
+
+        thread = threading.Thread(target=sender, name="handoff_webhook", daemon=True)
+        thread.start()
 
     def _resolve_parallel_next(
         self,

@@ -122,8 +122,28 @@ def _paused_graph_states(limit: int = 20):
     return paused
 
 
+def _load_budget_history(history_path: Path) -> list[dict[str, Any]]:
+    if not history_path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        with history_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return rows
+
+
 def render_home(cfg: dict, db: MemoryDB):
     st.title("🧠 Cognitive Symbiont — Homebase (v2.4)")
+    st.autorefresh(interval=15000, key="home_autorefresh")
     st.markdown(
         "Welcome! Symbiont drafts small, reviewable changes for you. **You stay in control**—every script pauses for approval and every step is logged so you can undo it later."
     )
@@ -236,6 +256,30 @@ def render_home(cfg: dict, db: MemoryDB):
                 st.markdown(
                     f"**Token budgets:** used {total_used} / {total_limit or '∞'} across {len(latest)} trackers"
                 )
+                history_rows = _load_budget_history(token_dir / "history.jsonl")
+                if history_rows:
+                    try:
+                        import pandas as pd  # type: ignore
+
+                        df = pd.DataFrame(history_rows)
+                        if not df.empty:
+                            df["tokens"] = df.get("prompt_tokens", 0).fillna(0) + df.get("response_tokens", 0).fillna(0)
+                            df = df.sort_values("ts")
+                            df["ts"] = pd.to_datetime(df["ts"], unit="s")
+                            chart = df.pivot_table(index="ts", columns="label", values="tokens", aggfunc="sum").fillna(0)
+                            chart = chart.cumsum()
+                            st.line_chart(chart)
+                            st.dataframe(df.tail(20)[["ts", "label", "tokens", "outcome"]].rename(columns={"ts": "timestamp", "tokens": "Δtokens"}))
+                    except Exception:
+                        # Fall back to manual aggregation
+                        history_rows = sorted(history_rows, key=lambda r: r.get("ts", 0))
+                        bucket: dict[str, int] = {}
+                        for row in history_rows:
+                            label = row.get("label", "unknown")
+                            delta = int(row.get("prompt_tokens", 0) or 0) + int(row.get("response_tokens", 0) or 0)
+                            bucket[label] = bucket.get(label, 0) + delta
+                        if bucket:
+                            st.json(bucket)
             else:
                 configured_limit = cfg.get("max_tokens")
                 if configured_limit:

@@ -67,7 +67,7 @@ class SwarmCoordinator:
             budget=budget,
         )
         # Also merge any outstanding transcripts (e.g., from manual peer chats)
-        self.merge_from_transcripts()
+        self.merge_from_transcripts(budget=budget)
         return winners
 
     # ------------------------------------------------------------------
@@ -333,7 +333,7 @@ class SwarmCoordinator:
             )
 
     # ------------------------------------------------------------------
-    def merge_from_transcripts(self) -> List[SwarmVariant]:
+    def merge_from_transcripts(self, *, budget: Optional[TokenBudget] = None) -> List[SwarmVariant]:
         transcripts_dir = self.repo_root / "data" / "artifacts" / "ai_peer"
         processed_dir = transcripts_dir / "processed"
         ensure_dirs([processed_dir])
@@ -373,7 +373,7 @@ class SwarmCoordinator:
 
         winners = self._merge_variants(scored)
         if winners:
-            self._apply_winners(winners, winners[0].triple, budget=None)
+            self._apply_winners(winners, winners[0].triple, budget=budget)
         return winners
 
     # ------------------------------------------------------------------

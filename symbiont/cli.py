@@ -430,7 +430,18 @@ def swarm_evolve(
     if not swarm.enabled:
         rprint("[yellow]Swarm evolution disabled (set evolution.swarm_enabled=true).")
         raise typer.Exit(1)
-    winners = swarm.run(belief or "", variants=variants, auto=auto, apply=True)
+    limit = 0
+    try:
+        limit = int(cfg.get("max_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    budget = TokenBudget(
+        limit=limit,
+        label="cli:swarm_evolve",
+        sink_path=data_root / "token_budget" / "cli_swarm_evolve.json",
+    )
+    winners = swarm.run(belief or "", variants=variants, auto=auto, apply=True, budget=budget)
     if not winners:
         rprint("[yellow]No swarm winners produced.")
         return
@@ -456,7 +467,18 @@ def swarm_propose(
     if not swarm.enabled:
         rprint("[yellow]Swarm evolution disabled (set evolution.swarm_enabled=true).")
         raise typer.Exit(1)
-    winners = swarm.run(belief or "", variants=variants, auto=False, apply=False)
+    limit = 0
+    try:
+        limit = int(cfg.get("max_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    budget = TokenBudget(
+        limit=limit,
+        label="cli:swarm_propose",
+        sink_path=data_root / "token_budget" / "cli_swarm_propose.json",
+    )
+    winners = swarm.run(belief or "", variants=variants, auto=False, apply=False, budget=budget)
     if not winners:
         rprint("[yellow]No swarm variants produced.")
         return
@@ -478,7 +500,18 @@ def swarm_merge_transcripts(config_path: str = "./configs/config.yaml"):
     if not swarm.enabled:
         rprint("[yellow]Swarm evolution disabled (set evolution.swarm_enabled=true).")
         raise typer.Exit(1)
-    winners = swarm.merge_from_transcripts()
+    limit = 0
+    try:
+        limit = int(cfg.get("max_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    budget = TokenBudget(
+        limit=limit,
+        label="cli:swarm_merge",
+        sink_path=data_root / "token_budget" / "cli_swarm_merge.json",
+    )
+    winners = swarm.merge_from_transcripts(budget=budget)
     if not winners:
         rprint("[yellow]No new transcripts to merge.")
         return

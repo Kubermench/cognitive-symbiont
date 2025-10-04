@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from symbiont.agents.swarm import SwarmCoordinator, SwarmVariant
+from symbiont.llm.budget import TokenBudget
 
 
 @pytest.fixture
@@ -19,6 +20,39 @@ def swarm_cfg(tmp_path):
         "evolution": {"swarm_enabled": True},
         "ports": {"ai_peer": {"stub_mode": True}},
     }
+
+
+def test_swarm_run_uses_budget(monkeypatch, swarm_cfg):
+    coordinator = SwarmCoordinator(swarm_cfg)
+    budget = TokenBudget(limit=100, label="test")
+
+    def fake_dispatch(self, provider, model, cmd, prompt, timeout):
+        if "belief" in prompt or "Interpret" in prompt:
+            return json.dumps({"subject": "repo", "relation": "needs", "object": "linting"})
+        return json.dumps([
+            {"subject": "repo", "relation": "needs", "object": "linting"},
+        ])
+
+    capture_score = {}
+
+    monkeypatch.setattr(
+        coordinator.llm,
+        "_dispatch",
+        fake_dispatch.__get__(coordinator.llm, type(coordinator.llm)),
+    )
+    monkeypatch.setattr(coordinator.llm, "_should_use_cloud", lambda self, prompt: False)
+
+    def fake_score(variants, *, budget=None):
+        capture_score["budget"] = budget
+        return []
+
+    monkeypatch.setattr(coordinator, "_score_variants", fake_score)
+
+    result = coordinator.run("need better docs", variants=1, auto=False, apply=False, budget=budget)
+
+    assert result == []
+    assert capture_score.get("budget") is budget
+    assert budget.events, "Token budget should record LLM usage"
 
 
 def test_swarm_run_merges_best_variants(monkeypatch, swarm_cfg):
@@ -142,7 +176,11 @@ def test_after_cycle_invokes_run(monkeypatch, swarm_cfg):
     ]
     called = {}
     monkeypatch.setattr(coordinator, "run", lambda *args, **kwargs: called.setdefault("run", winners))
-    monkeypatch.setattr(coordinator, "merge_from_transcripts", lambda: called.setdefault("merge", True))
+    monkeypatch.setattr(
+        coordinator,
+        "merge_from_transcripts",
+        lambda *, budget=None: called.setdefault("merge", True),
+    )
 
     result = coordinator.after_cycle({"decision": {"action": "Tighten lint"}})
     assert result == winners
