@@ -1,0 +1,43 @@
+agents:
+  research_scout:
+    role: research_scout
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: local
+    cache: in_memory
+    tools: [repo_scan]
+  insight_researcher:
+    role: insight_researcher
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  innovation_specialist:
+    role: innovation_specialist
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: local
+    cache: in_memory
+    tools: []
+  judge:
+    role: judge
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 400
+    cache: in_memory
+    tools: []
+
+crew:
+  research_monitor:
+    sequence:
+      - research_scout
+      - insight_researcher
+      - innovation_specialist
+      - judge

@@ -345,7 +345,7 @@ def guard(script: str = typer.Option(None, "--script", help="Path to script to a
     if plan:
         plan_path = Path(plan)
         ptext = plan_path.read_text(encoding="utf-8") if plan_path.exists() else ""
-        plan_report = guard_mod.analyze_plan(ptext)
+        plan_report = guard_mod.analyze_plan(ptext, cfg)
         report.setdefault("plan", plan_report)
     if not report:
         rprint("[yellow]Nothing to analyse. Provide --script or --plan.")

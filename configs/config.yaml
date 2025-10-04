@@ -78,6 +78,10 @@ voice:
   wake_word: symbiont
 guard:
   auto_approve_safe: false
+  judge:
+    enabled: false
+    risk_threshold: 0.6
+    prompt: "You are a safeguard judge. Assess the plan and return JSON {\"risk\": float, \"verdict\": string, \"reasons\": [string]}\nPlan:\n{plan}\n"
 browser:
   enabled: true
   allowlist:

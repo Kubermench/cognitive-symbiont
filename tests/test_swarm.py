@@ -94,7 +94,8 @@ def test_merge_from_transcripts_promotes_winners(monkeypatch, swarm_cfg, tmp_pat
 
     monkeypatch.setattr("symbiont.agents.swarm.graphrag.add_claim", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        "symbiont.agents.swarm.analyze_plan", lambda _: {"flags": {"risk": "high"}}
+        "symbiont.agents.swarm.analyze_plan",
+        lambda *args, **kwargs: {"flags": {"risk": "high"}},
     )
 
     winners = coordinator.merge_from_transcripts()
@@ -214,7 +215,8 @@ def test_apply_winners_writes_artifact(monkeypatch, swarm_cfg, tmp_path):
     coordinator.db.ensure_schema()
     monkeypatch.setattr("symbiont.agents.swarm.graphrag.add_claim", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        "symbiont.agents.swarm.analyze_plan", lambda _: {"flags": {"risk": "high"}}
+        "symbiont.agents.swarm.analyze_plan",
+        lambda *args, **kwargs: {"flags": {"risk": "high"}},
     )
 
     winners = [
@@ -266,7 +268,9 @@ def test_merge_from_transcripts_archives_invalid(monkeypatch, swarm_cfg, tmp_pat
     )
 
     monkeypatch.setattr("symbiont.agents.swarm.graphrag.add_claim", lambda *args, **kwargs: None)
-    monkeypatch.setattr("symbiont.agents.swarm.analyze_plan", lambda _: {})
+    monkeypatch.setattr(
+        "symbiont.agents.swarm.analyze_plan", lambda *args, **kwargs: {}
+    )
 
     winners = coordinator.merge_from_transcripts()
     assert winners == []

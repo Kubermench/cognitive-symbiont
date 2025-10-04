@@ -268,7 +268,7 @@ class SwarmCoordinator:
 
         # basic governance check on descriptions
         plan_text = json.dumps(payload)
-        report = analyze_plan(plan_text)
+        report = analyze_plan(plan_text, self.config)
         if report.get("flags"):
             path.write_text(
                 path.read_text(encoding="utf-8")

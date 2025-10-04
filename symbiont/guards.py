@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
+
+from symbiont.llm.client import LLMClient
 
 RISK_PATTERNS = [
     (re.compile(r"rm\s+-rf\s+/"), 0.8, "Deletes root directory"),
@@ -54,16 +56,70 @@ def analyze_script(script_path: Path) -> Dict[str, any]:
     }
 
 
-def analyze_plan(plan_text: str) -> Dict[str, any]:
+def _judge_with_llm(plan_text: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    guard_cfg = (cfg.get("guard") or {})
+    judge_cfg = guard_cfg.get("judge") or {}
+    if not judge_cfg.get("enabled"):
+        return {}
+
+    llm_cfg = judge_cfg.get("llm") or cfg.get("llm") or {}
+    prompt_template = judge_cfg.get(
+        "prompt",
+        """You are a risk auditor. Review the following execution plan.
+Return a JSON object with fields:
+  risk: float between 0 and 1 (higher is more dangerous)
+  verdict: one of ["low","medium","high"]
+  reasons: array of short strings explaining the risk.
+Plan:\n{plan}\n""",
+    )
+    prompt = prompt_template.format(plan=plan_text)
+    client = LLMClient(llm_cfg)
+    try:
+        raw = client.generate(prompt)
+    except Exception as exc:  # pragma: no cover - network specific
+        return {"error": str(exc)}
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = {}
+
+    risk = parsed.get("risk")
+    verdict = parsed.get("verdict")
+    reasons = parsed.get("reasons") or []
+    if not isinstance(reasons, list):
+        reasons = [str(reasons)]
+
+    result = {
+        "raw": raw,
+        "risk": risk if isinstance(risk, (int, float)) else None,
+        "verdict": verdict if isinstance(verdict, str) else None,
+        "reasons": reasons,
+    }
+
+    threshold = float(judge_cfg.get("risk_threshold", 0.5))
+    if result["risk"] is not None and result["risk"] >= threshold:
+        result["flag"] = f"LLM judge risk {result['risk']:.2f}"
+    return result
+
+
+def analyze_plan(plan_text: str, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     flags: List[str] = []
     lowered = plan_text.lower()
     if "drop database" in lowered:
         flags.append("Plan mentions dropping a database")
     if "production" in lowered and "backup" not in lowered:
         flags.append("Touches production without referencing backups")
-    return {"flags": flags}
+    report: Dict[str, Any] = {"flags": flags}
+    if cfg:
+        judge_report = _judge_with_llm(plan_text, cfg)
+        if judge_report:
+            report["judge"] = judge_report
+            flag = judge_report.get("flag")
+            if flag:
+                report.setdefault("flags", []).append(flag)
+    return report
 
 
 def serialize_report(report: Dict[str, any]) -> str:
     return json.dumps(report, indent=2)
-
