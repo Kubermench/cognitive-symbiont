@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ if str(ROOT) not in sys.path:
 
 from symbiont.llm.client import LLMClient
 from symbiont.orchestration.graph import GraphSpec
+from symbiont.ports.ai_peer import AIPeerBridge
 
 
 def test_graphspec_resolves_relative_crew_config(tmp_path):
@@ -81,3 +83,28 @@ def test_llmclient_hybrid_prefers_local(monkeypatch):
     assert dummy_cloud.calls == 0
 
     os.environ.pop("OPENAI_API_KEY", None)
+
+
+def test_ai_peer_chat_persists_agent_id(tmp_path):
+    cfg = {
+        "data_root": str(tmp_path),
+        "ports": {"ai_peer": {"stub_mode": True}},
+        "llm": {},
+    }
+    bridge = AIPeerBridge(cfg)
+    transcript = bridge.chat("Hello", simulate_only=False, agent_id="peer-123")
+    payload = json.loads(Path(transcript.path).read_text())
+    assert payload["agent_id"] == "peer-123"
+    assert payload["prompt"] == "Hello"
+
+
+def test_ai_peer_chat_relays_when_not_stub(tmp_path, monkeypatch):
+    cfg = {
+        "data_root": str(tmp_path),
+        "ports": {"ai_peer": {"stub_mode": False}},
+        "llm": {},
+    }
+    bridge = AIPeerBridge(cfg)
+    monkeypatch.setattr(bridge, "_relay", lambda prompt: "relayed")
+    transcript = bridge.chat("Ping", simulate_only=False, agent_id=None)
+    assert transcript.response == "relayed"

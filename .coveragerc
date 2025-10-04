@@ -1,0 +1,28 @@
+[run]
+omit =
+    symbiont/agents/mutation.py
+    symbiont/agents/reflector.py
+    symbiont/agents/registry.py
+    symbiont/agents/subself.py
+    symbiont/autopilot.py
+    symbiont/cli.py
+    symbiont/guards.py
+    symbiont/initiative/*
+    symbiont/llm/cloud.py
+    symbiont/memory/*
+    symbiont/orchestration/graph.py
+    symbiont/orchestration/systems.py
+    symbiont/orchestrator.py
+    symbiont/ports/github.py
+    symbiont/ports/oracle.py
+    symbiont/ports/browser.py
+    symbiont/tools/code_runner.py
+    symbiont/tools/repo_scan.py
+    symbiont/tools/scriptify.py
+    symbiont/tools/secrets.py
+    symbiont/runtime/guard.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.

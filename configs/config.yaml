@@ -18,6 +18,11 @@ initiative:
   goal_template: Repo idle; propose one 10-minute refactor and draft a script.
   watch_config_path: ./configs/watch_targets.yaml
   autonomy_mode: guarded
+  pubsub:
+    enabled: false
+    backend: memory  # memory | redis
+    channel: symbiont:initiative
+    log_path: ./data/initiative/events.jsonl
 evolution:
   enabled: true
   repeat_threshold: 3
