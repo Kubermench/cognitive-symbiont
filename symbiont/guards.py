@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import subprocess
+import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -62,14 +66,24 @@ def analyze_script(script_path: Path) -> Dict[str, any]:
         score += weight
         issues.append({"kind": "privilege_escalation", "count": sudo_hits, "weight": weight})
 
-    # Soft cap 0-1
+    lint_messages = lint_diff_with_ruff(path=script_path)
+    if lint_messages:
+        delta = min(0.25, 0.05 * len(lint_messages))
+        score += delta
+        issues.append({"kind": "lint", "messages": lint_messages, "weight": delta})
+
     score = min(1.0, score)
+
+    proof = build_safety_proof(script_path)
+    zk_stub = generate_zk_stub(proof)
 
     return {
         "path": str(script_path),
         "rogue_score": round(score, 2),
         "issues": issues,
         "length": len(text.splitlines()),
+        "proof": proof,
+        "zk_stub": zk_stub,
     }
 
 
@@ -202,3 +216,79 @@ def analyze_plan(
 
 def serialize_report(report: Dict[str, any]) -> str:
     return json.dumps(report, indent=2)
+
+
+def lint_diff_with_ruff(
+    diff_text: str = "",
+    *,
+    path: Optional[Path] = None,
+    config: Optional[str] = None,
+) -> List[str]:
+    cmd = ["ruff", "check"]
+    if config:
+        cmd.extend(["--config", config])
+    stdin_data = None
+    if path:
+        cmd.append(str(path))
+    else:
+        cmd.append("--diff")
+        stdin_data = diff_text.encode("utf-8")
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=stdin_data,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return ["ruff not installed"] if not path else []
+
+    if proc.returncode == 0:
+        return []
+    output = proc.stdout.decode("utf-8", "ignore") + proc.stderr.decode("utf-8", "ignore")
+    messages = [line.strip() for line in output.splitlines() if line.strip()]
+    return messages[:20]
+
+
+def build_safety_proof(script_path: Path) -> Dict[str, Any]:
+    payload = script_path.read_bytes() if script_path.exists() else b""
+    proof = {
+        "algo": "sha256",
+        "hash": hashlib.sha256(payload).hexdigest(),
+        "length": len(payload),
+    }
+    with suppress(Exception):
+        from pymerkle import MerkleTree  # type: ignore
+
+        tree = MerkleTree()
+        tree.encrypt(payload)
+        proof["merkle_root"] = tree.rootHash.decode("utf-8")
+    return proof
+
+
+def generate_zk_stub(proof: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "statement": "Script hash attested without exposing contents",
+        "timestamp": int(time.time()),
+        "hash": proof.get("hash"),
+        "merkle_root": proof.get("merkle_root"),
+    }
+
+
+def verify_zk_stub(proof: Dict[str, Any], script_path: Path) -> bool:
+    expected = build_safety_proof(script_path)
+    return bool(proof) and proof.get("hash") == expected.get("hash")
+
+
+def preflight_diff_guard(diff_text: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    lint_issues = lint_diff_with_ruff(
+        diff_text,
+        config=(cfg.get("guard") or {}).get("ruff_config"),
+    )
+    rogue_delta = min(0.35, 0.05 * len(lint_issues))
+    return {
+        "lint_issues": lint_issues,
+        "rogue_delta": rogue_delta,
+        "approved": not lint_issues,
+    }

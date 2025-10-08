@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, json, time
+import os, json, re, time
 from pathlib import Path
 from typing import List, Dict, Any
 from rich import print as rprint
@@ -24,6 +24,8 @@ class Orchestrator:
         self.reflector = CycleReflector(config)
         swarm_candidate = SwarmCoordinator(config)
         self.swarm = swarm_candidate if swarm_candidate.enabled else None
+        self._rlhf_dir = Path(self.db.db_path).parent / "artifacts" / "rlhf"
+        self._rlhf_dir.mkdir(parents=True, exist_ok=True)
 
     def cycle(self, goal: str) -> Dict[str, Any]:
         self.db.ensure_schema()
@@ -66,7 +68,8 @@ class Orchestrator:
             with self.db._conn() as c:
                 c.execute("INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))", (None,'script',spath,'Script from bullets'))
                 c.execute("INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))", (None,'script',rpath,'Rollback script'))
-        result = {"episode_id": eid, "decision": decision, "trace": trace}
+        reward = self._score_cycle(trace, goal)
+        result = {"episode_id": eid, "decision": decision, "trace": trace, "reward": reward}
         try:
             self.reflector.observe_cycle(result)
         except Exception as exc:  # pragma: no cover - reflection should not break main flow
@@ -77,6 +80,7 @@ class Orchestrator:
             except Exception as exc:  # pragma: no cover
                 rprint(f"[yellow]Swarm evolution skipped:[/yellow] {exc}")
         rprint("[bold green]Consensus Action:[/bold green]", decision["action"], "\n[dim]Saved:", plan)
+        self._log_cycle_reward(eid, goal, reward, trace)
         return result
 
     def _consensus(self, trace: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -148,3 +152,74 @@ class Orchestrator:
         with self.db._conn() as c:
             c.execute("INSERT INTO artifacts (task_id,type,path,summary,created_at) VALUES (?,?,?,?,strftime('%s','now'))", (None,'plan',fpath,f"Plan for: {goal}"))
         return fpath
+
+    def _score_cycle(self, trace: List[Dict[str, Any]], goal: str) -> float:
+        reward = 0.6
+        architect = next((o for o in trace if o["role"] == "architect"), None)
+        critic = next((o for o in trace if o["role"] == "critic"), None)
+        if architect:
+            bullets = architect["output"].get("bullets", []) or []
+            reward += 0.1 * min(3, len(bullets))
+        if critic and critic["output"].get("verdict") == "block":
+            reward -= 0.4
+        if "rlhf" in goal.lower():
+            reward += 0.05
+        return round(max(0.0, min(1.0, reward)), 3)
+
+    def _log_cycle_reward(
+        self,
+        episode_id: int,
+        goal: str,
+        reward: float,
+        trace: List[Dict[str, Any]],
+    ) -> None:
+        payload = {
+            "episode_id": episode_id,
+            "goal": self._scrub_text(goal),
+            "reward": reward,
+            "timestamp": int(time.time()),
+            "agents": [
+                {
+                    "role": entry["role"],
+                    "score": entry["output"].get("score"),
+                }
+                for entry in trace
+            ],
+        }
+        path = self._rlhf_dir / f"reward_{episode_id}.json"
+        try:
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _scrub_text(self, text: str) -> str:
+        if not text:
+            return ""
+        patterns = [
+            r"sk-[a-zA-Z0-9]{20,}",
+            r"[A-Za-z0-9_]+=\S+",
+            r"(?i)password\s*[:=]\s*\S+",
+        ]
+        scrubbed = text
+        for pattern in patterns:
+            scrubbed = re.sub(pattern, "[redacted]", scrubbed)
+        return scrubbed
+
+    def train_from_rewards(self) -> Dict[str, Any]:
+        """Aggregate reward history for lightweight RLHF fine-tuning."""
+
+        records: List[Dict[str, Any]] = []
+        for reward_file in sorted(self._rlhf_dir.glob("reward_*.json")):
+            try:
+                records.append(json.loads(reward_file.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+        if not records:
+            return {"count": 0, "mean_reward": 0.0}
+        mean_reward = sum(r.get("reward", 0.0) for r in records) / len(records)
+        top = sorted(records, key=lambda r: r.get("reward", 0.0), reverse=True)[:5]
+        return {
+            "count": len(records),
+            "mean_reward": round(mean_reward, 3),
+            "top_examples": top,
+        }

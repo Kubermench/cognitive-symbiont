@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, Any, Tuple, List, Optional
 
 import logging
+from pydantic import BaseModel, Field, ValidationError
 from tenacity import (
     RetryCallState,
     Retrying,
@@ -15,8 +16,10 @@ from tenacity import (
 
 from ..orchestrator import Orchestrator
 from ..agents.registry import AgentRegistry, CrewRunner
+from ..llm.client import LLMClient
 from ..memory.db import MemoryDB
 from ..tools.files import ensure_dirs
+from ..tools.research import call_peer_collaborators
 from .watchers import RepoWatchConfig, build_repo_watch_configs
 from .pubsub import get_client
 from .state import get_state_store, resolve_node_id
@@ -25,6 +28,44 @@ from .state import get_state_store, resolve_node_id
 STATE_DIR = os.path.join("./data", "initiative")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
 STOP_PATH = os.path.join(STATE_DIR, "STOP")
+
+
+class CollaborationModel(BaseModel):
+    enabled: bool = False
+    models: List[str] = Field(default_factory=list)
+    max_items: int = 2
+    llm_override: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MetaCrewModel(BaseModel):
+    name: str
+    trigger: str = "high"
+    min_score: float = 0.8
+
+
+class ForesightConfigModel(BaseModel):
+    enabled: bool = False
+    crew: str = "foresight_weaver"
+    goal: str = "Emerging agentic AI trends"
+    crew_config: Optional[str] = "./configs/crews/foresight_weaver.yaml"
+    timer_minutes: int = 1440
+    idle_minutes: int = 240
+    min_timer_minutes: int = 120
+    min_idle_minutes: int = 60
+    trigger_mode: str = "any"
+    relevance_thresholds: Dict[str, float] = Field(default_factory=lambda: {"high": 1.5, "medium": 1.0})
+    collaboration: CollaborationModel = CollaborationModel()
+    meta_crew: Optional[MetaCrewModel] = None
+
+
+def validate_foresight_config(payload: Dict[str, Any] | None) -> ForesightConfigModel:
+    if not isinstance(payload, dict):
+        return ForesightConfigModel()
+    try:
+        return ForesightConfigModel.model_validate(payload)
+    except ValidationError as exc:
+        logger.warning("Invalid foresight config; using defaults: %s", exc)
+        return ForesightConfigModel()
 
 
 def _now() -> int:
@@ -186,13 +227,15 @@ def _should_trigger(cfg: Dict[str, Any]) -> Tuple[bool, List[str], Optional[Repo
 def _foresight_should_trigger(
     cfg: Dict[str, Any]
 ) -> Tuple[bool, List[str], Dict[str, Any], Dict[str, Any], int]:
-    foresight_cfg = cfg.get("foresight")
+    model = validate_foresight_config(cfg.get("foresight"))
     state = _load_state()
     now = _now()
-    if not isinstance(foresight_cfg, dict) or not foresight_cfg.get("enabled", False):
+    if not model.enabled:
         return False, ["foresight.disabled"], {}, state, now
 
-    base_interval = int(foresight_cfg.get("timer_minutes", 1440) or 1440)
+    foresight_cfg = model.model_dump(mode="json")
+
+    base_interval = int(model.timer_minutes or 1440)
     interval = int(state.get("foresight_next_timer_minutes", base_interval) or base_interval)
     last_run = int(state.get("foresight_last_run_ts", 0))
     elapsed = now - last_run
@@ -209,7 +252,7 @@ def _foresight_should_trigger(
             minutes = max(1, remaining // 60) if remaining else 1
             pending.append(f"foresight.wait<{minutes}m")
 
-    base_idle = int(foresight_cfg.get("idle_minutes", 0) or 0)
+    base_idle = int(model.idle_minutes or 0)
     idle_minutes = int(state.get("foresight_next_idle_minutes", base_idle) or base_idle)
     idle_ok = True
     if idle_minutes > 0:
@@ -221,7 +264,7 @@ def _foresight_should_trigger(
         else:
             reasons.append(f"foresight.idle>={idle_minutes}m")
 
-    trigger_mode = str(foresight_cfg.get("trigger_mode", "any") or "any").lower()
+    trigger_mode = str(model.trigger_mode or "any").lower()
     if trigger_mode == "idle_and_timer":
         due = timer_ok and idle_ok
     else:
@@ -242,9 +285,16 @@ def _run_foresight(
     now: int,
     reasons: List[str],
 ) -> Dict[str, Any]:
-    crew_name = foresight_cfg.get("crew", "foresight_weaver")
-    goal = foresight_cfg.get("goal", "Emerging agentic AI trends")
-    crew_config_path = foresight_cfg.get("crew_config") or foresight_cfg.get("crews_path") or "./configs/crews/foresight_weaver.yaml"
+    model = validate_foresight_config(foresight_cfg)
+
+    crew_name = model.crew
+    goal = model.goal
+    crew_config_path = (
+        foresight_cfg.get("crew_config")
+        or foresight_cfg.get("crews_path")
+        or model.crew_config
+        or "./configs/crews/foresight_weaver.yaml"
+    )
     crews_file = Path(crew_config_path).expanduser().resolve()
 
     try:
@@ -272,8 +322,33 @@ def _run_foresight(
     state["last_proposal_ts"] = now
 
     relevance_score = 0.0
+    sources = run_context.get("foresight_sources", {}) if isinstance(run_context, dict) else {}
+
+    collaboration = model.collaboration
+    if collaboration.enabled:
+        llm_cfg = collaboration.llm_override or cfg.get("llm", {})
+        try:
+            peers_payload = call_peer_collaborators(
+                LLMClient(llm_cfg),
+                goal,
+                models=collaboration.models or None,
+                max_items=collaboration.max_items,
+            )
+        except Exception as exc:
+            logger.warning("Peer collaboration failed: %s", exc)
+        else:
+            sources = dict(sources or {})
+            items = list(sources.get("items") or [])
+            items.extend(peers_payload.get("items") or [])
+            sources["items"] = items
+            meta = dict(sources.get("meta") or {})
+            meta.setdefault("peer_contributors", []).extend(
+                peers_payload.get("contributors", [peers_payload.get("source", "peer")])
+            )
+            sources["meta"] = meta
+            run_context["foresight_sources"] = sources
+
     try:
-        sources = run_context.get("foresight_sources", {}) if isinstance(run_context, dict) else {}
         meta = sources.get("meta", {}) if isinstance(sources, dict) else {}
         breakdown = meta.get("source_breakdown", {}) if isinstance(meta, dict) else {}
         if breakdown:
@@ -283,13 +358,13 @@ def _run_foresight(
     except Exception:
         relevance_score = 0.0
 
-    thresholds_cfg = foresight_cfg.get("relevance_thresholds", {}) if isinstance(foresight_cfg, dict) else {}
+    thresholds_cfg = model.relevance_thresholds
     high_threshold = float(thresholds_cfg.get("high", 1.5))
     medium_threshold = float(thresholds_cfg.get("medium", 1.0))
-    base_timer = int(foresight_cfg.get("timer_minutes", 1440) or 1440)
-    min_timer = int(foresight_cfg.get("min_timer_minutes", base_timer) or base_timer)
-    base_idle = int(foresight_cfg.get("idle_minutes", 0) or 0)
-    min_idle = int(foresight_cfg.get("min_idle_minutes", base_idle) or base_idle)
+    base_timer = int(model.timer_minutes or 1440)
+    min_timer = int(model.min_timer_minutes or base_timer)
+    base_idle = int(model.idle_minutes or 0)
+    min_idle = int(model.min_idle_minutes or base_idle)
 
     next_timer = base_timer
     next_idle = base_idle
@@ -308,6 +383,15 @@ def _run_foresight(
     state["foresight_last_relevance"] = relevance_score
     _save_state(state)
 
+    meta_triggered = None
+    meta_cfg = model.meta_crew
+    if meta_cfg and relevance_score >= float(meta_cfg.min_score):
+        try:
+            runner.run(meta_cfg.name, f"Meta reflection for {goal}")
+            meta_triggered = meta_cfg.name
+        except Exception as exc:
+            logger.warning("Meta crew %s failed: %s", meta_cfg.name, exc)
+
     _publish_event(
         cfg,
         {
@@ -319,6 +403,7 @@ def _run_foresight(
             "relevance": relevance_score,
             "next_timer_minutes": next_timer,
             "next_idle_minutes": next_idle if base_idle else None,
+            "meta_triggered": meta_triggered,
         },
     )
     return {
@@ -329,6 +414,7 @@ def _run_foresight(
         "relevance": relevance_score,
         "next_timer_minutes": next_timer,
         "next_idle_minutes": next_idle if base_idle else None,
+        "meta_triggered": meta_triggered,
     }
 
 

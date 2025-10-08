@@ -1,12 +1,17 @@
+import asyncio
 import json
 import sqlite3
 from pathlib import Path
 
+import pytest
 import yaml
+from hypothesis import given
+from hypothesis import strategies as st
 
 from symbiont.agents.registry import AgentRegistry, CrewRunner
 from symbiont.llm.client import LLMClient
 from symbiont.memory.db import MemoryDB
+from symbiont.memory.dynamic_analyzer import BayesianTrendAnalyzer
 from symbiont.tools import research, systems_os
 
 
@@ -161,3 +166,83 @@ def test_foresight_metadata_artifacts(monkeypatch, tmp_path):
     assert "Document and review" in proposal  # fallback engaged
 
     systems_os.SYSTEMS_ROOT = original_root  # type: ignore
+
+
+def test_async_trend_hunt_merges_sources(monkeypatch):
+    monkeypatch.setattr(
+        research,
+        "_fetch_live_sources",
+        lambda goal, limit: [
+            {
+                "title": "Async signal",
+                "summary": goal,
+                "source": "arxiv",
+                "url": "https://example.com/async",
+                "published": "2025-01-01",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        research,
+        "call_peer_collaborators",
+        lambda llm, goal, models=None, max_items=2: {
+            "items": [
+                {
+                    "title": "Peer ping",
+                    "summary": "Collaborator insight",
+                    "source": "peer",
+                    "url": "https://peer.example",
+                    "peer_support": 0.9,
+                }
+            ],
+            "source": "peer",
+            "contributors": ["peer"],
+        },
+    )
+    result = asyncio.run(
+        research.gather_trend_sources_async(
+            LLMClient({}),
+            "async foresight",
+            include_collaborators=True,
+        )
+    )
+    assert any(item["source"] == "peer" for item in result["items"])
+
+
+def test_async_trend_handles_failures(monkeypatch):
+    monkeypatch.setattr(research, "_fetch_live_sources", lambda *_: [])
+
+    def _boom(*_, **__):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(research, "call_peer_collaborators", _boom)
+    result = asyncio.run(
+        research.gather_trend_sources_async(
+            LLMClient({}),
+            "resilient",
+            include_collaborators=True,
+        )
+    )
+    assert result["items"] == []
+
+
+@given(
+    priors=st.dictionaries(
+        keys=st.sampled_from(["arxiv", "peer", "rss", "web"]),
+        values=st.floats(min_value=0.05, max_value=0.95),
+        min_size=1,
+    )
+)
+def test_bayesian_posterior_bounds(priors):
+    analyzer = BayesianTrendAnalyzer(priors=priors)
+    source = next(iter(priors.keys()))
+    item = {
+        "source": source,
+        "summary": "agentic foresight autonomy",
+        "published": "2025-01-01",
+        "peer_support": 0.5,
+    }
+    ranked = analyzer.rank_sources("agentic foresight", [item])
+    assert ranked
+    score = ranked[0]["score"]
+    assert 0.0 <= score <= 1.0

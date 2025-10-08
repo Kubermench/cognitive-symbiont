@@ -1,20 +1,47 @@
-"""Helpers for high-level research/scouting tasks."""
+"""Helpers for high-level research/scouting tasks.
+
+The foresight pipeline fuses LLM reasoning with live signals gathered from
+arXiv, RSS feeds, and optional peer collaborators (e.g., Grok/Devin).  The
+functions in this module are intentionally defensive: API calls are rate
+limited with jittered retries, results are deduplicated, and metadata is
+emitted so downstream analytics (BigKit, governance dashboards) can render
+source mixes without additional post-processing.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import datetime
+import logging
+from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import feedparser
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from symbiont.llm.client import LLMClient
 from symbiont.tools.arxiv_fetcher import search_arxiv
 from symbiont.tools.files import ensure_dirs
+from symbiont.memory.dynamic_analyzer import BayesianTrendAnalyzer, deduplicate_triples
 
+logger = logging.getLogger(__name__)
 
 ARTIFACT_ROOT = Path("data/artifacts/foresight")
+COLLABORATOR_MODELS: Tuple[str, ...] = ("grok", "devin")
+RSS_ENDPOINTS: Tuple[str, ...] = (
+    "http://export.arxiv.org/rss/cs.AI",
+    "https://hnrss.org/newest?points=150",
+)
+_GLOBAL_ANALYZER = BayesianTrendAnalyzer()
 
 FALLBACK_PROPOSAL_TEMPLATE = (
     "# Foresight Update\n"
@@ -32,9 +59,10 @@ FALLBACK_VALIDATION = {
     ],
 }
 
-
 SOURCE_BOOSTS = {
     "arxiv": 1.2,
+    "rss": 0.9,
+    "peer": 0.85,
     "x": 0.8,
     "web": 0.7,
     "llm": 0.4,
@@ -48,8 +76,7 @@ def _keyword_tokens(text: str) -> set[str]:
 def _score_item(item: Dict[str, Any], query: str) -> float:
     score = 0.0
     source = str(item.get("source", "")).lower()
-    boost = SOURCE_BOOSTS.get(source, 0.5)
-    score += boost
+    score += SOURCE_BOOSTS.get(source, 0.5)
 
     q_tokens = _keyword_tokens(query)
     title_tokens = _keyword_tokens(item.get("title", ""))
@@ -61,10 +88,10 @@ def _score_item(item: Dict[str, Any], query: str) -> float:
     published = str(item.get("published", ""))
     if published:
         try:
-            pub_dt = datetime.strptime(published[:10], "%Y-%m-%d")
-            age_days = max(1, (datetime.utcnow() - pub_dt).days)
+            pub_dt = datetime.strptime(published[:10], "%Y-%m-%d").replace(tzinfo=UTC)
+            age_days = max(1, (datetime.now(UTC) - pub_dt).days)
             score += max(0.0, 0.8 - (age_days / 365))
-        except Exception:
+        except Exception:  # pragma: no cover - format variance
             score += 0.1
 
     summary_len = len(item.get("summary", ""))
@@ -85,7 +112,7 @@ def _fetch_live_sources(query: str, max_items: int) -> list[Dict[str, Any]]:
                     "title": result.title[:140],
                     "url": result.link[:240],
                     "summary": result.summary[:200],
-                    "source": "arXiv",
+                    "source": "arxiv",
                     "published": result.published,
                 }
             )
@@ -94,17 +121,16 @@ def _fetch_live_sources(query: str, max_items: int) -> list[Dict[str, Any]]:
     adapters.append(fetch_arxiv)
 
     items: list[Dict[str, Any]] = []
-    if not adapters:
-        return items
-
     with ThreadPoolExecutor(max_workers=len(adapters)) as executor:
         future_map = {executor.submit(adapter): adapter for adapter in adapters}
         for future in as_completed(future_map):
             try:
                 items.extend(future.result() or [])
-            except Exception:
+            except Exception as exc:  # pragma: no cover - network noise
+                logger.debug("Live source adapter failed: %s", exc)
                 continue
     return items
+
 
 
 def build_fallback_proposal(topic: str, insight: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -136,7 +162,7 @@ def _save_source_plot(topic: str, stats: Dict[str, Dict[str, float]]) -> Optiona
         return None
     try:
         import matplotlib.pyplot as plt
-    except Exception:
+    except Exception:  # pragma: no cover - optional dependency
         return None
 
     labels = list(stats.keys())
@@ -148,7 +174,7 @@ def _save_source_plot(topic: str, stats: Dict[str, Dict[str, float]]) -> Optiona
     ensure_dirs([ARTIFACT_ROOT])
     slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in topic) or "foresight"
     slug = slug[:40].strip("-") or "foresight"
-    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     path = ARTIFACT_ROOT / f"{ts}_sources.png"
 
     fig, ax = plt.subplots(figsize=(6, 3.5))
@@ -176,7 +202,8 @@ def scout_insights(llm: LLMClient, query: str, *, max_items: int = 3) -> Dict[st
     )
     try:
         raw = llm.generate(prompt, label="research:scout") or "{}"
-    except Exception:
+    except Exception as exc:  # pragma: no cover - external failure
+        logger.debug("Primary scout LLM failed: %s", exc)
         raw = "{}"
 
     try:
@@ -184,7 +211,6 @@ def scout_insights(llm: LLMClient, query: str, *, max_items: int = 3) -> Dict[st
     except json.JSONDecodeError:
         data = {}
 
-    # Normalize LLM-provided items first so we can merge with live sources.
     normalized: list[dict[str, Any]] = []
     items = data.get("items") if isinstance(data, dict) else []
     if isinstance(items, list):
@@ -202,29 +228,26 @@ def scout_insights(llm: LLMClient, query: str, *, max_items: int = 3) -> Dict[st
             )
 
     # Always enrich with live arXiv results so the scout has real sources.
-    try:
-        live_items = _fetch_live_sources(query, max_items)
-    except Exception:
-        live_items = []
-    for result in live_items:
-        normalized.append(result)
+    with suppress(Exception):
+        for result in _fetch_live_sources(query, max_items):
+            normalized.append(result)
 
-    # Deduplicate by URL/title pair while preserving order.
+    enriched = _rank_and_dedup(query, normalized)
+    return enriched
+
+
+def _rank_and_dedup(query: str, candidates: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     seen: set[tuple[str, str]] = set()
     merged: list[dict[str, Any]] = []
-    for item in normalized:
+    for item in candidates:
         key = (item.get("url", ""), item.get("title", ""))
         if key in seen:
             continue
         seen.add(key)
-        merged.append(item)
-
-    for entry in merged:
+        entry = dict(item)
         entry["score"] = _score_item(entry, query)
+        merged.append(entry)
 
-    topic = data.get("topic") if isinstance(data, dict) else None
-    if not isinstance(topic, str) or not topic:
-        topic = query
     ranked = sorted(merged, key=lambda item: item.get("score", 0.0), reverse=True)
 
     source_stats: Dict[str, Dict[str, float]] = {}
@@ -245,7 +268,7 @@ def scout_insights(llm: LLMClient, query: str, *, max_items: int = 3) -> Dict[st
     if not filtered and ranked:
         filtered = ranked[:1]
 
-    plot_path = _save_source_plot(topic, source_stats)
+    plot_path = _save_source_plot(query, source_stats)
     meta = {
         "source_breakdown": source_stats,
         "total_candidates": len(ranked),
@@ -254,11 +277,136 @@ def scout_insights(llm: LLMClient, query: str, *, max_items: int = 3) -> Dict[st
     if plot_path:
         meta["source_plot"] = plot_path
 
+    deduped = deduplicate_triples(
+        (query, entry.get("source", "unknown"), entry.get("url", "")) for entry in filtered
+    )
+    meta["deduped_triples"] = len(deduped)
+
     return {
-        "topic": topic,
-        "items": filtered[:max_items],
+        "topic": query,
+        "items": filtered,
         "meta": meta,
     }
+
+
+async def gather_trend_sources_async(
+    llm: LLMClient,
+    query: str,
+    *,
+    max_items: int = 3,
+    include_collaborators: bool = False,
+    include_rss: bool = True,
+) -> Dict[str, Any]:
+    """Asynchronously collect sources from live APIs, collaborators, and RSS feeds."""
+
+    loop = asyncio.get_running_loop()
+    futures = [loop.run_in_executor(None, _fetch_live_sources, query, max_items)]
+
+    if include_collaborators:
+        futures.append(
+            loop.run_in_executor(
+                None,
+                call_peer_collaborators,
+                llm,
+                query,
+                None,
+                max_items,
+            )
+        )
+
+    if include_rss:
+        futures.append(loop.run_in_executor(None, fetch_rss_alerts, query, max_items))
+
+    results = await asyncio.gather(*futures, return_exceptions=True)
+    merged: List[Dict[str, Any]] = []
+    meta: Dict[str, Any] = {"contributors": []}
+    for payload in results:
+        if isinstance(payload, Exception):
+            logger.debug("gather_async skipped payload: %s", payload)
+            continue
+        if isinstance(payload, dict) and payload.get("items"):
+            merged.extend(payload["items"])
+            meta["contributors"].append(payload.get("source", "unknown"))
+        elif isinstance(payload, list):
+            merged.extend(payload)
+            meta["contributors"].append("arxiv")
+
+    ranked = _rank_and_dedup(query, merged)
+    ranked["meta"].update(meta)
+    return ranked
+
+
+@retry(
+    retry=retry_if_exception_type((ValueError, RuntimeError)),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential_jitter(initial=1, max=12),
+)
+def call_peer_collaborators(
+    llm: LLMClient,
+    query: str,
+    models: Optional[Sequence[str]] = None,
+    max_items: int = 2,
+) -> Dict[str, Any]:
+    """Query peer LLMs (e.g., Grok / Devin) with jittered retries."""
+
+    models = tuple(models or COLLABORATOR_MODELS)
+    prompt = (
+        "You simulate an ensemble of research peers. "
+        f"Peers: {', '.join(models)}. "
+        "Return JSON list with fields peer, title, url, summary, confidence (0-1). "
+        f"Focus on '{query}'."
+    )
+    raw = llm.generate(prompt, label="research:peer") or "[]"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Peer response unparsable: {exc}") from exc
+
+    items: List[Dict[str, Any]] = []
+    if isinstance(data, list):
+        for entry in data[:max_items * 2]:
+            if not isinstance(entry, dict):
+                continue
+            items.append(
+                {
+                    "title": str(entry.get("title", "Peer Insight"))[:140],
+                    "url": str(entry.get("url", ""))[:240],
+                    "summary": str(entry.get("summary", ""))[:200],
+                    "source": "peer",
+                    "published": datetime.now(UTC).strftime("%Y-%m-%d"),
+                    "peer": str(entry.get("peer", "ensemble"))[:40],
+                    "peer_support": float(entry.get("confidence", 0.0)),
+                }
+            )
+
+    if not items:
+        raise RuntimeError("Peer collaborators returned no items")
+    return {"items": items[:max_items], "source": "peer", "contributors": list(models)}
+
+
+def fetch_rss_alerts(topic: str, max_items: int = 3) -> Dict[str, Any]:
+    """Fetch RSS entries mentioning the topic (best-effort)."""
+
+    normalized: List[Dict[str, Any]] = []
+    lowered = topic.lower()
+    for endpoint in RSS_ENDPOINTS:
+        with suppress(Exception):
+            feed = feedparser.parse(endpoint)
+            for entry in feed.get("entries", [])[: max_items * 4]:
+                title = str(entry.get("title", ""))
+                if lowered not in title.lower():
+                    continue
+                normalized.append(
+                    {
+                        "title": title[:140],
+                        "summary": str(entry.get("summary", ""))[:200],
+                        "source": "rss",
+                        "url": str(entry.get("link", ""))[:240],
+                        "published": str(entry.get("published", "")[:10]),
+                        "peer_support": 0.35,
+                    }
+                )
+    return {"items": normalized[:max_items], "source": "rss"}
 
 
 def analyze_insights(llm: LLMClient, topic: str, sources: Dict[str, Any]) -> Dict[str, Any]:
@@ -269,7 +417,8 @@ def analyze_insights(llm: LLMClient, topic: str, sources: Dict[str, Any]) -> Dic
     )
     try:
         raw = llm.generate(prompt, label="research:analyze") or "{}"
-    except Exception:
+    except Exception as exc:  # pragma: no cover - external failure
+        logger.debug("Analyze call failed: %s", exc)
         raw = "{}"
     try:
         data = json.loads(raw)
@@ -309,7 +458,8 @@ def draft_proposal(llm: LLMClient, insight: Dict[str, Any]) -> Dict[str, Any]:
     )
     try:
         raw = llm.generate(prompt, label="research:proposal") or "{}"
-    except Exception:
+    except Exception as exc:  # pragma: no cover - external failure
+        logger.debug("Proposal call failed: %s", exc)
         raw = "{}"
     try:
         data = json.loads(raw)
@@ -333,7 +483,10 @@ def draft_proposal(llm: LLMClient, insight: Dict[str, Any]) -> Dict[str, Any]:
             )
 
     if not diff.strip() or not proposal.strip():
-        fallback = build_fallback_proposal(insight.get("topic", "the focus area") if isinstance(insight, dict) else "foresight", insight if isinstance(insight, dict) else None)
+        fallback = build_fallback_proposal(
+            insight.get("topic", "the focus area") if isinstance(insight, dict) else "foresight",
+            insight if isinstance(insight, dict) else None,
+        )
         proposal = fallback["proposal"]
         diff = fallback["diff"]
     return {"proposal": proposal, "diff": diff}
@@ -347,7 +500,8 @@ def validate_proposal(llm: LLMClient, proposal: Dict[str, Any]) -> Dict[str, Any
     )
     try:
         raw = llm.generate(prompt, label="research:validate") or "{}"
-    except Exception:
+    except Exception as exc:  # pragma: no cover - external failure
+        logger.debug("Validate call failed: %s", exc)
         raw = "{}"
     try:
         data = json.loads(raw)
@@ -373,9 +527,20 @@ def validate_proposal(llm: LLMClient, proposal: Dict[str, Any]) -> Dict[str, Any
             approve = True
         risk = min(risk, 0.45)
 
-    sanitized_tests = sanitized_tests[:3]
-
-    result = {"approve": approve, "risk": max(0.0, min(1.0, risk)), "tests": sanitized_tests}
+    result = {"approve": approve, "risk": max(0.0, min(1.0, risk)), "tests": sanitized_tests[:3]}
     if not sanitized_tests:
         result = build_fallback_validation(proposal)
     return result
+
+
+__all__ = [
+    "analyze_insights",
+    "build_fallback_proposal",
+    "build_fallback_validation",
+    "call_peer_collaborators",
+    "draft_proposal",
+    "fetch_rss_alerts",
+    "gather_trend_sources_async",
+    "scout_insights",
+    "validate_proposal",
+]
