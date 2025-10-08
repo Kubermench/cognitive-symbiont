@@ -16,7 +16,10 @@ from symbiont.llm.budget import TokenBudget
 def swarm_cfg(tmp_path):
     return {
         "db_path": str(tmp_path / "sym.db"),
-        "initiative": {"repo_path": str(tmp_path)},
+        "initiative": {
+            "repo_path": str(tmp_path),
+            "state": {"backend": "sqlite", "path": str(tmp_path / "state.db")},
+        },
         "evolution": {"swarm_enabled": True},
         "ports": {"ai_peer": {"stub_mode": True}},
     }

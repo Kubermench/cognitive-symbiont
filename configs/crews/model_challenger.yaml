@@ -1,0 +1,15 @@
+agents:
+  model_challenger_agent:
+    role: model_challenger
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+
+crew:
+  model_challenger:
+    sequence:
+      - model_challenger_agent

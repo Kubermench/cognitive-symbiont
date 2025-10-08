@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from symbiont.llm.client import LLMClient
 from symbiont.llm.budget import TokenBudget
+from symbiont.tools import systems_os
 
 RISK_PATTERNS = [
     (re.compile(r"rm\s+-rf\s+/"), 0.8, "Deletes root directory"),
@@ -23,6 +24,21 @@ LOOP_PATTERNS = [
 ]
 
 SUDO_PATTERN = re.compile(r"sudo\s+", re.IGNORECASE)
+
+INJECTION_PATTERNS = [
+    (re.compile(r"ignore\s+(?:all\s+)?previous\s+instructions", re.IGNORECASE),
+     "Contains prompt injection phrase 'ignore previous instructions'"),
+    (re.compile(r"strip\s+guards?", re.IGNORECASE), "Asks to disable safety guards"),
+    (re.compile(r"override\s+(?:system|guard)", re.IGNORECASE), "Requests guard override"),
+]
+
+CYNEFIN_RULES = {
+    "clear": "Sense → Categorize → Respond",
+    "complicated": "Sense → Analyze → Respond",
+    "complex": "Probe → Sense → Respond",
+    "chaotic": "Act → Sense → Respond",
+    "disorder": "Gather more information",
+}
 
 
 def analyze_script(script_path: Path) -> Dict[str, any]:
@@ -109,6 +125,52 @@ Plan:\n{plan}\n""",
     return result
 
 
+def _classify_cynefin(
+    plan_text: str,
+    cfg: Optional[Dict[str, Any]] = None,
+    *,
+    budget: Optional[TokenBudget] = None,
+) -> Dict[str, Any]:
+    llm_cfg = (cfg or {}).get("guard", {}).get("cynefin", {}).get("llm") if cfg else None
+    llm_cfg = llm_cfg or (cfg or {}).get("llm", {})
+    client = LLMClient(llm_cfg)
+    prompt = (
+        "Classify the following plan into Cynefin domain (clear, complicated, complex, chaotic, disorder)."
+        " Provide JSON with keys domain, reason, probes (array of <=3 short suggestions).\n"
+        f"Plan: {plan_text}"
+    )
+    try:
+        raw = client.generate(prompt, budget=budget, label="guard:cynefin")
+    except Exception as exc:  # pragma: no cover - network specific
+        return {"error": str(exc)}
+    domain = "disorder"
+    reason = ""
+    probes: List[str] = []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            domain = str(data.get("domain", domain)).lower()
+            reason = str(data.get("reason", ""))
+            if isinstance(data.get("probes"), list):
+                probes = [str(p)[:120] for p in data["probes"][:3]]
+    except json.JSONDecodeError:
+        reason = "LLM parse error"
+    if domain not in CYNEFIN_RULES:
+        domain = "disorder"
+    rule = CYNEFIN_RULES.get(domain, "Assess further")
+    try:
+        row = "| {domain} | {reason} | {signals} | {rule} |".format(
+            domain=domain.capitalize(),
+            reason=reason[:80],
+            signals=", ".join(probes)[:80],
+            rule=rule,
+        )
+        systems_os.append_markdown("Cynefin.md", [row])
+    except Exception:  # pragma: no cover - best effort logging
+        pass
+    return {"domain": domain, "rule": rule, "reason": reason, "probes": probes}
+
+
 def analyze_plan(
     plan_text: str,
     cfg: Optional[Dict[str, Any]] = None,
@@ -121,6 +183,9 @@ def analyze_plan(
         flags.append("Plan mentions dropping a database")
     if "production" in lowered and "backup" not in lowered:
         flags.append("Touches production without referencing backups")
+    for pattern, reason in INJECTION_PATTERNS:
+        if pattern.search(plan_text):
+            flags.append(reason)
     report: Dict[str, Any] = {"flags": flags}
     if cfg:
         judge_report = _judge_with_llm(plan_text, cfg, budget=budget)
@@ -129,6 +194,9 @@ def analyze_plan(
             flag = judge_report.get("flag")
             if flag:
                 report.setdefault("flags", []).append(flag)
+        cynefin = _classify_cynefin(plan_text, cfg, budget=budget)
+        if cynefin:
+            report["cynefin"] = cynefin
     return report
 
 

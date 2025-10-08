@@ -1,0 +1,19 @@
+crew_config: ../crews.yaml
+
+graph:
+  start: scout
+  nodes:
+    scout:
+      agent: scout
+      next: architect
+    architect:
+      agent: architect
+      on_success: critic
+      on_failure: END
+    critic:
+      agent: critic
+      on_success: executor
+      on_block: END
+    executor:
+      agent: executor
+      next: END

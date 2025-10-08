@@ -14,6 +14,7 @@ from ..llm.budget import TokenBudget
 from ..memory.db import MemoryDB
 from ..memory import graphrag
 from ..tools.files import ensure_dirs
+from ..tools.security import scrub_text
 
 
 @dataclass
@@ -121,7 +122,7 @@ class QueryOracle:
     def _write_note(self, query: str, url: str, content: str) -> Path:
         ts = int(time.time())
         fname = self.notes_dir / f"oracle_{ts}.md"
-        summary = content[:1000]
+        summary = scrub_text(content[:1000])
         fname.write_text(
             f"# Oracle Result\nQuery: {query}\nURL: {url}\n\n```\n{summary}\n```\n",
             encoding="utf-8",

@@ -1,0 +1,25 @@
+agents:
+  loop_mapper_agent:
+    role: loop_mapper
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: [repo_scan]
+  leverage_ranker_agent:
+    role: leverage_ranker
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+
+crew:
+  leverage_scanner:
+    sequence:
+      - loop_mapper_agent
+      - leverage_ranker_agent

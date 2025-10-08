@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional
 from ..llm.client import LLMClient
 from ..llm.budget import TokenBudget
 from ..tools.files import ensure_dirs
+from ..tools.security import scrub_payload
 
 
 @dataclass
@@ -79,5 +80,6 @@ class AIPeerBridge:
             "timestamp": ts,
             "agent_id": agent_id,
         }
+        payload = scrub_payload(payload)
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path

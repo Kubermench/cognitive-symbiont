@@ -6,6 +6,15 @@ import subprocess
 import time
 from typing import Dict, Optional
 
+from tenacity import (
+    RetryCallState,
+    RetryError,
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
 from .budget import TokenBudget
 
 logger = logging.getLogger(__name__)
@@ -27,6 +36,16 @@ class LLMClient:
         self._cloud_refresh_seconds = int(self.cloud_cfg.get("refresh_seconds", 3600))
         if self.mode in {"cloud", "hybrid"} and self.cloud_cfg:
             self._init_cloud_client()
+
+        retry_cfg = cfg.get("retry", {}) or {}
+        self._retry_attempts = max(1, int(retry_cfg.get("attempts", 3) or 3))
+        self._retry_initial = max(0.1, float(retry_cfg.get("initial_seconds", 0.5) or 0.5))
+        self._retry_multiplier = max(1.0, float(retry_cfg.get("multiplier", 2.0) or 2.0))
+        self._retry_max = max(
+            self._retry_initial,
+            float(retry_cfg.get("max_seconds", 20.0) or 20.0),
+        )
+        self._retry_enabled = bool(retry_cfg.get("enabled", True))
 
     def generate(
         self,
@@ -55,7 +74,33 @@ class LLMClient:
                 return ""
 
             start = time.monotonic()
-            output = func()
+            try:
+                output = self._call_with_retry(func)
+            except Exception as exc:
+                latency = time.monotonic() - start
+                if budget:
+                    budget.log_attempt(
+                        prompt_tokens=prompt_tokens,
+                        response_tokens=0,
+                        provider=provider,
+                        model=model,
+                        label=label,
+                        source=source,
+                        outcome="error",
+                        latency=latency,
+                        error=str(exc),
+                    )
+                logger.warning(
+                    "LLM call failed for %s/%s via %s: %s",
+                    provider,
+                    model,
+                    source,
+                    exc,
+                )
+                return ""
+
+            if output is None:
+                output = ""
             latency = time.monotonic() - start
             response_tokens = TokenBudget.estimate(output) if budget else 0
             if budget:
@@ -282,3 +327,41 @@ class LLMClient:
         if now - self._cloud_last_refresh >= self._cloud_refresh_seconds:
             logger.info("Refreshing cloud LLM credentials after %s seconds", self._cloud_refresh_seconds)
             self._init_cloud_client()
+
+    # ------------------------------------------------------------------
+    def _call_with_retry(self, func):
+        if not self._retry_enabled or self._retry_attempts <= 1:
+            return func()
+        retryer = Retrying(
+            retry=retry_if_exception_type(Exception),
+            stop=stop_after_attempt(self._retry_attempts),
+            wait=wait_exponential(
+                multiplier=self._retry_initial,
+                exp_base=self._retry_multiplier,
+                min=self._retry_initial,
+                max=self._retry_max,
+            ),
+            reraise=True,
+            before_sleep=self._log_retry_warning,
+            sleep=time.sleep,
+        )
+        try:
+            return retryer(func)
+        except RetryError as exc:
+            last_attempt = exc.last_attempt
+            if last_attempt and last_attempt.outcome:
+                exception = last_attempt.outcome.exception()
+                if exception is not None:
+                    raise exception
+            raise
+
+    def _log_retry_warning(self, retry_state: RetryCallState) -> None:
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        if not exc:
+            return
+        logger.warning(
+            "LLM retry %s/%s failed: %s",
+            retry_state.attempt_number,
+            self._retry_attempts,
+            exc,
+        )

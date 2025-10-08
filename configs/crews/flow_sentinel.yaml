@@ -1,0 +1,15 @@
+agents:
+  flow_analyzer_agent:
+    role: flow_analyzer
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+
+crew:
+  flow_sentinel:
+    sequence:
+      - flow_analyzer_agent

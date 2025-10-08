@@ -52,8 +52,10 @@ class TokenBudget:
         source: str,
         outcome: str,
         latency: float,
+        attempt: int | None = None,
+        error: str | None = None,
     ) -> None:
-        if outcome != "denied":
+        if outcome == "ok":
             self.used += prompt_tokens + response_tokens
         event = {
             "ts": int(time.time()),
@@ -67,6 +69,10 @@ class TokenBudget:
             "latency_seconds": round(latency, 3),
             "remaining": self.remaining(),
         }
+        if attempt is not None:
+            event["attempt"] = attempt
+        if error:
+            event["error"] = error
         with self._lock:
             self.events.append(event)
             self._write_snapshot()

@@ -1,0 +1,15 @@
+agents:
+  success_miner_agent:
+    role: success_miner
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+
+crew:
+  success_miner:
+    sequence:
+      - success_miner_agent

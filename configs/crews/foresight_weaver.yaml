@@ -1,0 +1,55 @@
+agents:
+  foresight_scout_agent:
+    role: foresight_scout
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  foresight_analyzer_agent:
+    role: foresight_analyzer
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  foresight_suggester_agent:
+    role: foresight_suggester
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  foresight_validator_agent:
+    role: foresight_validator
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  foresight_evolver_agent:
+    role: foresight_evolver
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+
+crew:
+  foresight_weaver:
+    sequence:
+      - foresight_scout_agent
+      - foresight_analyzer_agent
+      - foresight_suggester_agent
+      - foresight_validator_agent
+      - foresight_evolver_agent

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ast
+import atexit
 import json
+import logging
 import re
 import time
 import uuid
@@ -11,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import networkx as nx
 
+from ..initiative.state import generate_worker_id, get_state_store, resolve_node_id
 from ..llm.client import LLMClient
 from ..llm.budget import TokenBudget
 from ..memory.db import MemoryDB
@@ -18,6 +21,9 @@ from ..memory import graphrag
 from ..ports.ai_peer import AIPeerBridge
 from ..tools.files import ensure_dirs
 from ..guards import analyze_plan
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,6 +51,17 @@ class SwarmCoordinator:
         self.db = MemoryDB(db_path=self.config.get("db_path", "./data/symbiont.db"))
         ensure_dirs([self.repo_root / "data" / "artifacts" / "swarm"])
         ensure_dirs([self.repo_root / "data" / "artifacts" / "ai_peer" / "processed"])
+
+        self.state_store = get_state_store(self.config)
+        self.node_id = resolve_node_id(self.config)
+        self.worker_id = generate_worker_id("swarm")
+        bootstrap_status = "idle" if self.enabled else "disabled"
+        self._record_swarm_state(
+            bootstrap_status,
+            variants=self.variants,
+            details={"enabled": self.enabled},
+        )
+        atexit.register(self._cleanup_swarm_state)
 
     # ------------------------------------------------------------------
     def after_cycle(
@@ -82,8 +99,20 @@ class SwarmCoordinator:
     ) -> List[SwarmVariant]:
         variants = variants or self.variants
         self.db.ensure_schema()
+        self._record_swarm_state(
+            "running",
+            goal=belief_text,
+            variants=variants,
+            details={"auto": auto, "apply": apply},
+        )
         seed = self._ensure_seed_triple(belief_text, auto, budget=budget)
         if not seed:
+            self._record_swarm_state(
+                "idle",
+                goal=None,
+                variants=0,
+                details={"last_goal": belief_text, "reason": "no_seed"},
+            )
             return []
 
         forks = self._fork_variants(seed, variants, budget=budget)
@@ -91,6 +120,18 @@ class SwarmCoordinator:
         winners = self._merge_variants(scored)
         if winners and apply:
             self._apply_winners(winners, seed, budget=budget)
+        self._record_swarm_state(
+            "completed",
+            goal=belief_text,
+            variants=len(winners),
+            details={"winner_count": len(winners)},
+        )
+        self._record_swarm_state(
+            "idle",
+            goal=None,
+            variants=len(winners),
+            details={"last_goal": belief_text, "winner_count": len(winners)},
+        )
         return winners
 
     # ------------------------------------------------------------------
@@ -337,6 +378,7 @@ class SwarmCoordinator:
         transcripts_dir = self.repo_root / "data" / "artifacts" / "ai_peer"
         processed_dir = transcripts_dir / "processed"
         ensure_dirs([processed_dir])
+        self.db.ensure_schema()
 
         scored: List[SwarmVariant] = []
         for path in sorted(transcripts_dir.glob("peer_*.json")):
@@ -348,6 +390,10 @@ class SwarmCoordinator:
                 self._archive_transcript(path)
                 continue
 
+            if not isinstance(payload, dict):
+                self._archive_transcript(path)
+                continue
+
             triple = self._parse_triple_from_prompt(payload.get("prompt", ""))
             if not triple:
                 self._archive_transcript(path)
@@ -355,6 +401,8 @@ class SwarmCoordinator:
 
             try:
                 response_payload = json.loads(payload.get("response", ""))
+                if not isinstance(response_payload, dict):
+                    raise ValueError("response is not a mapping")
                 score = float(response_payload.get("score", 0.0))
                 justification = str(response_payload.get("justification", ""))
             except Exception:
@@ -384,6 +432,44 @@ class SwarmCoordinator:
             path.rename(processed_dir / path.name)
         except Exception:
             pass
+
+    def _record_swarm_state(
+        self,
+        status: str,
+        *,
+        goal: Optional[str] = None,
+        variants: Optional[int] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not getattr(self, "state_store", None):
+            return
+        try:
+            self.state_store.record_swarm_worker(
+                worker_id=self.worker_id,
+                node_id=self.node_id,
+                status=status,
+                goal=goal,
+                variants=variants,
+                details=details or {},
+            )
+        except Exception:  # pragma: no cover - telemetry only
+            logger.debug("Failed to persist swarm state", exc_info=True)
+
+    def _cleanup_swarm_state(self) -> None:
+        if not getattr(self, "state_store", None):
+            return
+        try:
+            self.state_store.record_swarm_worker(
+                worker_id=self.worker_id,
+                node_id=self.node_id,
+                status="stopped",
+                goal=None,
+                variants=None,
+                details={"exit": True},
+            )
+            self.state_store.clear_swarm_worker(self.worker_id)
+        except Exception:  # pragma: no cover - telemetry only
+            logger.debug("Failed to clear swarm state", exc_info=True)
 
     def _parse_triple_from_prompt(self, prompt: str) -> Optional[Dict[str, str]]:
         if not prompt:

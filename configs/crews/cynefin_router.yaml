@@ -1,0 +1,25 @@
+agents:
+  cynefin_classifier_agent:
+    role: cynefin_classifier
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  cynefin_planner_agent:
+    role: cynefin_planner
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+
+crew:
+  cynefin_router:
+    sequence:
+      - cynefin_classifier_agent
+      - cynefin_planner_agent

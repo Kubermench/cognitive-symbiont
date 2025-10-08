@@ -11,15 +11,36 @@ from urllib.parse import urlparse
 
 import yaml
 import requests
+from tenacity import (
+    RetryCallState,
+    RetryError,
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from ..agents.registry import AgentRegistry
 from ..agents.subself import SubSelf
 from ..llm.budget import TokenBudget
 from ..memory.db import MemoryDB
 from ..tools import scriptify, sd_engine
+from .schema import GraphFileModel
 from .systems import governance_snapshot
 
 logger = logging.getLogger(__name__)
+
+
+def _is_url_allowed(url: str, allow_domains: list[str]) -> bool:
+    if not url:
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    if not allow_domains:
+        return True
+    normalized = {domain.lower() for domain in allow_domains}
+    return parsed.netloc.lower() in normalized
 
 
 @dataclass
@@ -55,16 +76,12 @@ class GraphSpec:
 
     @classmethod
     def from_yaml(cls, path: Path) -> "GraphSpec":
-        data = yaml.safe_load(path.read_text()) or {}
-        graph_data = data.get("graph", {})
-        start = graph_data.get("start")
-        if not start:
-            raise ValueError("Graph spec missing 'graph.start'")
-        nodes_section = graph_data.get("nodes", {})
-        nodes = {name: NodeSpec.from_dict(name, spec) for name, spec in nodes_section.items()}
-        crew_config_value = data.get("crew_config") if data else None
-        if crew_config_value is None:
-            crew_config_value = data.get("crews") if data else None
+        raw = yaml.safe_load(path.read_text()) or {}
+        model = GraphFileModel.model_validate(raw)
+        section = model.graph
+        start = section.start
+        nodes = {name: NodeSpec.from_dict(name, node.model_dump()) for name, node in section.nodes.items()}
+        crew_config_value = model.require_crew_path()
         crew_config = Path(crew_config_value).expanduser() if crew_config_value else None
         if not crew_config:
             raise ValueError("Graph spec missing 'crew_config' pointing to crews YAML")
@@ -74,9 +91,8 @@ class GraphSpec:
             crew_config = crew_config.resolve()
         if not crew_config.exists():
             raise ValueError(f"Crew config not found at {crew_config}")
-        simulation = data.get("simulation") or None
-        parallel = graph_data.get("parallel", [])
-        parallel_groups = [list(group) for group in parallel if isinstance(group, (list, tuple))]
+        simulation = model.simulation or None
+        parallel_groups = [list(group) for group in section.parallel]
         return cls(
             start=start,
             nodes=nodes,
@@ -727,21 +743,19 @@ class GraphRunner:
         if not url:
             return
 
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            logger.warning("Skipping handoff webhook: invalid URL '%s'", url)
+        allow_domains = notif_cfg.get("allow_domains") or []
+        if not _is_url_allowed(url, allow_domains):
+            logger.warning("Skipping handoff webhook: URL '%s' not allowlisted", url)
             return
 
-        allow_domains = notif_cfg.get("allow_domains") or []
-        if allow_domains:
-            domain = parsed.netloc.lower()
-            allow_set = {d.lower() for d in allow_domains}
-            if domain not in allow_set:
-                logger.warning("Skipping handoff webhook: domain '%s' not in allow list", domain)
-                return
+        for key in ("slack_webhook_url", "pagerduty_webhook_url"):
+            extra_url = notif_cfg.get(key)
+            if extra_url and not _is_url_allowed(extra_url, allow_domains):
+                logger.warning("Skipping %s: '%s' not allowlisted", key, extra_url)
 
         max_attempts = max(1, int(notif_cfg.get("retry_attempts", 3) or 3))
         backoff = max(0.5, float(notif_cfg.get("retry_backoff_seconds", 2.0) or 2.0))
+        max_backoff = float(notif_cfg.get("retry_max_seconds", backoff * 8.0) or (backoff * 8.0))
         timeout = float(notif_cfg.get("timeout_seconds", 5.0) or 5.0)
 
         if isinstance(self.cfg, dict):
@@ -779,27 +793,55 @@ class GraphRunner:
                 logger.debug("Failed writing handoff notification log", exc_info=True)
 
         def sender() -> None:
-            last_exc: Optional[Exception] = None
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    requests.post(url, json=payload, timeout=timeout)
-                    _write_log("success")
-                    return
-                except Exception as exc:  # pragma: no cover - network behaviour
-                    last_exc = exc
-                    logger.warning(
-                        "Handoff webhook attempt %s/%s failed: %s",
-                        attempt,
-                        max_attempts,
-                        exc,
-                    )
-                    if attempt < max_attempts:
-                        time.sleep(backoff * attempt)
-            if last_exc:
-                _write_log("failure", str(last_exc))
+            retryer = self._webhook_retryer(max_attempts, backoff, max_backoff)
+            try:
+                retryer(lambda: requests.post(url, json=payload, timeout=timeout))
+            except RetryError as exc:
+                cause = exc.last_attempt.outcome.exception() if exc.last_attempt else exc
+                message = str(cause)
+                _write_log("failure", message)
+                logger.warning(
+                    "Handoff webhook failed after %s attempts: %s",
+                    max_attempts,
+                    message,
+                )
+                return
+            except Exception as exc:  # pragma: no cover - unexpected transport errors
+                _write_log("failure", str(exc))
+                logger.warning("Handoff webhook error: %s", exc)
+                return
+
+            _write_log("success")
 
         thread = threading.Thread(target=sender, name="handoff_webhook", daemon=True)
         thread.start()
+
+    def _webhook_retryer(self, attempts: int, backoff: float, max_backoff: float) -> Retrying:
+        capped_attempts = max(1, attempts)
+
+        def _log_retry(state: RetryCallState) -> None:
+            exc = state.outcome.exception() if state.outcome else None
+            if exc:
+                logger.warning(
+                    "Webhook retry %s/%s failed: %s",
+                    state.attempt_number,
+                    capped_attempts,
+                    exc,
+                )
+
+        return Retrying(
+            retry=retry_if_exception_type(Exception),
+            stop=stop_after_attempt(capped_attempts),
+            wait=wait_exponential(
+                multiplier=backoff,
+                exp_base=2.0,
+                min=backoff,
+                max=max(max_backoff, backoff),
+            ),
+            reraise=True,
+            sleep=time.sleep,
+            before_sleep=_log_retry,
+        )
 
     def _resolve_parallel_next(
         self,

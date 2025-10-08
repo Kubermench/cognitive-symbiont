@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -13,7 +14,8 @@ from .subself import SubSelf
 from ..llm.client import LLMClient
 from ..llm.budget import TokenBudget
 from ..memory.db import MemoryDB
-from ..tools import scriptify
+from ..tools import scriptify, systems_os
+from ..orchestration.schema import CrewFileModel
 
 logger = logging.getLogger(__name__)
 
@@ -121,22 +123,22 @@ class AgentRegistry:
 
     @classmethod
     def from_yaml(cls, path: Path) -> "AgentRegistry":
-        data = yaml.safe_load(path.read_text()) or {}
-        agents_data = data.get("agents", {})
-        crews_data = data.get("crew", {}) or data.get("crews", {})
+        raw = yaml.safe_load(path.read_text()) or {}
+        model = CrewFileModel.model_validate(raw)
+        agents_data = model.agents
+        crews_data = model.resolved_crews()
         agents: Dict[str, AgentSpec] = {}
         for name, spec in agents_data.items():
             agents[name] = AgentSpec(
                 name=name,
-                role=spec.get("role", name),
-                llm=spec.get("llm", {}),
-                cache=spec.get("cache"),
-                tools=spec.get("tools", []),
+                role=spec.role,
+                llm=spec.llm,
+                cache=spec.cache,
+                tools=spec.tools,
             )
         crews: Dict[str, CrewSpec] = {}
         for name, spec in crews_data.items():
-            seq = spec.get("sequence") or spec.get("roles") or []
-            crews[name] = CrewSpec(name=name, sequence=seq)
+            crews[name] = CrewSpec(name=name, sequence=spec.resolved_sequence())
         return cls(agents, crews)
 
     def get_agent(self, name: str) -> AgentSpec:
@@ -194,6 +196,8 @@ class CrewRunner:
             )
             result = agent.run(context, memory_conn)
             outputs.append({"agent": agent_id, "result": result})
+            context_key = f"result:{agent_spec.role}"
+            context[context_key] = result
             if agent_spec.role == "architect":
                 latest_bullets = result.get("bullets", [])
             if agent_spec.role == "executor":
@@ -204,8 +208,33 @@ class CrewRunner:
                     episode_id=context.get("episode_id"),
                 )
                 outputs.append({"agent": agent_id, "script": script_path})
+            if agent_spec.role == "loop_mapper":
+                context["systems_loops"] = result.get("loops", [])
+            if agent_spec.role == "leverage_ranker":
+                context["leverage_points"] = result.get("leverage_points", [])
+            if agent_spec.role == "cynefin_classifier":
+                context["cynefin_domain"] = result.get("domain")
+                context["cynefin_reason"] = result.get("reason")
+                context["cynefin_signals"] = result.get("signals", [])
+            if agent_spec.role == "cynefin_planner":
+                context["cynefin_rule"] = result.get("rule")
+                context["cynefin_actions"] = result.get("actions", [])
+                context["cynefin_probes"] = result.get("probes", [])
+            if agent_spec.role == "model_challenger":
+                context["mental_model"] = {
+                    "model": result.get("model"),
+                    "counter_bet": result.get("counter_bet"),
+                    "experiment": result.get("experiment"),
+                    "signal": result.get("signal"),
+                }
+            if agent_spec.role == "success_miner":
+                context["safety_entry"] = result
+            if agent_spec.role == "coupling_analyzer":
+                context["coupling_entries"] = result.get("entries", [])
+                context["coupling_heat"] = result.get("heat", 0.0)
 
         artifact_path = self._persist_outputs(crew_name, goal, outputs)
+        self._post_process(crew_name, context)
         return artifact_path
 
     def _persist_outputs(self, crew_name: str, goal: str, outputs: list[dict[str, Any]]) -> Path:
@@ -223,3 +252,84 @@ class CrewRunner:
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path
+
+    def _post_process(self, crew_name: str, context: Dict[str, Any]) -> None:
+        if crew_name == "leverage_scanner":
+            loops = context.get("systems_loops", [])
+            leverage = context.get("leverage_points", [])
+            if loops:
+                rows = []
+                for loop in loops:
+                    rows.append(
+                        "| {date} | {name} | {type} | {stocks} | {flows} | {note} |".format(
+                            date=__import__("datetime").datetime.utcnow().strftime("%Y-%m-%d"),
+                            name=loop.get("name", "Unnamed"),
+                            type=loop.get("type", "unknown"),
+                            stocks=", ".join(loop.get("stocks", []))[:60],
+                            flows=", ".join(loop.get("flows", []))[:60],
+                            note=loop.get("note", "")[:80],
+                        )
+                    )
+                systems_os.append_markdown("Loops.md", rows)
+            if leverage:
+                rows = []
+                for idx, point in enumerate(leverage, start=1):
+                    rows.append(
+                        "| {rank} | {name} | {effort:.2f} | {impact:.2f} | {note} |".format(
+                            rank=idx,
+                            name=point.get("name", "Leverage"),
+                            effort=point.get("effort", 0.0),
+                            impact=point.get("impact", 0.0),
+                            note=point.get("description", "")[:80],
+                        )
+                    )
+                systems_os.append_markdown("LeverageList.md", rows)
+        if crew_name == "cynefin_router":
+            domain = context.get("cynefin_domain", "disorder")
+            rule = context.get("cynefin_rule", "Assess further")
+            signals = context.get("cynefin_signals", [])
+            actions = context.get("cynefin_actions", [])
+            row = "| {domain} | {reason} | {signals} | {rule} |".format(
+                domain=domain.capitalize(),
+                reason=context.get("cynefin_reason", "")[:80],
+                signals=", ".join(signals)[:80],
+                rule=rule[:80],
+            )
+            systems_os.append_markdown("Cynefin.md", [row])
+        if crew_name == "model_challenger":
+            mm = context.get("mental_model") or {}
+            row = "| {date} | {model} | {counter} | {experiment} | pending |".format(
+                date=__import__("datetime").datetime.utcnow().strftime("%Y-%m-%d"),
+                model=(mm.get("model") or "").replace("|", " ")[:60],
+                counter=(mm.get("counter_bet") or "").replace("|", " ")[:60],
+                experiment=(mm.get("experiment") or "").replace("|", " ")[:60],
+            )
+            systems_os.append_markdown("MentalModels.md", [row])
+        if crew_name == "success_miner":
+            entry = context.get("safety_entry") or {}
+            text = (
+                f"## {__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d')}\n"
+                f"What went right: {entry.get('what_went_right', '')}\n"
+                f"Adaptations: {entry.get('adaptations', '')}\n"
+                f"Signals: {entry.get('signals', '')}\n"
+                f"Next step: {entry.get('next_step', '')}\n"
+            )
+            systems_os.append_success_entry(text)
+        if crew_name == "coupling_analyzer":
+            entries = context.get("coupling_entries", [])
+            if entries:
+                systems_os.write_coupling_map(entries)
+        if crew_name == "foresight_weaver":
+            sources = context.get("foresight_sources") or {}
+            analysis = context.get("foresight_analysis") or {}
+            proposal = (context.get("foresight_proposal") or {}).get("proposal", "")
+            result = context.get("foresight_result") or {}
+            approval = "yes" if result.get("approved") else f"no (risk {result.get('validation', {}).get('risk', 'n/a')})"
+            row = "| {date} | {topic} | {highlight} | {proposal} | {approval} |".format(
+                date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                topic=str(sources.get("topic", "n/a"))[:40],
+                highlight=str(analysis.get("highlight", ""))[:60],
+                proposal=str(proposal)[:60],
+                approval=approval[:40],
+            )
+            systems_os.append_markdown("Foresight.md", [row])

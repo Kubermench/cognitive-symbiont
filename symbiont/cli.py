@@ -19,6 +19,9 @@ from . import guards as guard_mod
 from .ports.oracle import QueryOracle
 from .ports.ai_peer import AIPeerBridge
 from .ports.github import GitHubGuard
+from .observability.metrics import serve_metrics as start_metrics_server
+from .tools.security import rotate_env_secret
+from .tools.systems_os import update_flow_metrics
 from .initiative.watchers import WatchEvent  # noqa: F401 (placeholder for future use)
 from .runtime.guard import Guard, Action, Capability  # noqa: F401 (placeholder for future use)
 from .ports import browser as browser_port
@@ -530,24 +533,37 @@ def crew_run(
     goal: str = typer.Argument(..., help="Goal for the crew to address"),
     config_path: str = "./configs/config.yaml",
     crews_path: str = "./configs/crews.yaml",
+    dynamic: bool = typer.Option(False, "--dynamic", help="Generate a crew on the fly for this goal"),
 ):
     """Run a YAML-configured crew (researcher/planner/critic/etc.)."""
 
     cfg = load_config(config_path)
-    crews_file = Path(crews_path)
-    if not crews_file.exists():
-        rprint(f"[red]Crew config not found:[/red] {crews_file}")
-        raise typer.Exit(1)
+    dynamic_path: Path | None = None
+    if dynamic:
+        from symbiont.orchestration.dynamic import generate_dynamic_crew_yaml
+
+        new_name, dynamic_path = generate_dynamic_crew_yaml(goal, cfg)
+        crews_file = dynamic_path
+        target_crew = new_name
+        rprint(f"[cyan]Dynamic crew generated:[/cyan] {dynamic_path}")
+    else:
+        crews_file = Path(crews_path)
+        if not crews_file.exists():
+            rprint(f"[red]Crew config not found:[/red] {crews_file}")
+            raise typer.Exit(1)
+        target_crew = crew
 
     registry = AgentRegistry.from_yaml(crews_file)
     db = MemoryDB(db_path=cfg["db_path"])
     runner = CrewRunner(registry, cfg, db)
     try:
-        artifact_path = runner.run(crew, goal)
+        artifact_path = runner.run(target_crew, goal)
     except KeyError as exc:
         rprint(f"[red]{exc}" )
         raise typer.Exit(1)
-    rprint(f"[green]Crew {crew} finished.[/green] Transcript: {artifact_path}")
+    rprint(f"[green]Crew {target_crew} finished.[/green] Transcript: {artifact_path}")
+    if dynamic_path:
+        rprint(f"[blue]Dynamic spec saved at:[/blue] {dynamic_path}")
 
 
 @app.command()
@@ -871,6 +887,60 @@ def peer_chat(prompt: str, simulate: bool = typer.Option(False, "--simulate", he
     mode = "simulation" if transcript.simulated else "live"
     rprint(f"[green]{mode} peer response saved:[/green] {transcript.path}")
     print(transcript.response)
+
+
+@app.command()
+def metrics(
+    config_path: str = "./configs/config.yaml",
+    port: int = typer.Option(8001, "--port", help="Port for Prometheus metrics"),
+    interval: int = typer.Option(5, "--interval", help="Polling interval in seconds"),
+):
+    """Expose Prometheus /metrics for observability dashboards."""
+
+    cfg_path = Path(config_path).expanduser()
+    if not cfg_path.exists():
+        raise typer.BadParameter(f"Config not found: {cfg_path}")
+    rprint(f"[green]Serving metrics on port {port} (interval {interval}s). Press Ctrl+C to stop.")
+    start_metrics_server(str(cfg_path), port=port, interval=interval)
+
+
+@app.command()
+def rotate_credential(
+    env_key: str,
+    new_value: str,
+    config_path: str = "./configs/config.yaml",
+    env_file: str = typer.Option(None, "--env-file", help="Optional dotenv file to update"),
+    actor: str = typer.Option("operator", "--actor", help="Who initiated the rotation"),
+):
+    """Rotate an environment credential and log the event."""
+
+    cfg = load_config(config_path)
+    db_path = cfg.get("db_path", "./data/symbiont.db")
+    rotate_env_secret(env_key, new_value, db_path=db_path, actor=actor, persist_path=env_file)
+    rprint(f"[green]Rotated credential {env_key}. Audit trail recorded.")
+
+
+@app.command()
+def flow_metrics(
+    lead_time: float = typer.Option(0.0, help="Lead time in hours"),
+    deploy_freq: float = typer.Option(0.0, help="Deployments per day"),
+    mttr: float = typer.Option(0.0, help="Mean time to recovery in minutes"),
+    fail_rate: float = typer.Option(0.0, help="Change fail percentage (0-1)"),
+    path: str = typer.Option("systems/FlowMetrics.json", "--path", help="Metrics output path"),
+):
+    """Update flow metrics snapshot for dashboards."""
+
+    payload = {
+        "lead_time_hours": round(lead_time, 3),
+        "deploy_frequency_per_day": round(deploy_freq, 3),
+        "mttr_minutes": round(mttr, 3),
+        "change_fail_rate": round(fail_rate, 3),
+    }
+    update_flow_metrics(payload)
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    rprint(f"[green]Flow metrics written:[/green] {out_path}")
 
 
 @app.command()
