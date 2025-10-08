@@ -161,6 +161,7 @@ class CrewRunner:
         self.script_dir.mkdir(parents=True, exist_ok=True)
         self.crew_artifacts = Path("data/artifacts/crews")
         self.crew_artifacts.mkdir(parents=True, exist_ok=True)
+        self.last_context: Dict[str, Any] = {}
 
     def run(self, crew_name: str, goal: str) -> Path:
         crew = self.registry.get_crew(crew_name)
@@ -234,6 +235,7 @@ class CrewRunner:
                 context["coupling_heat"] = result.get("heat", 0.0)
 
         artifact_path = self._persist_outputs(crew_name, goal, outputs)
+        self.last_context = context
         self._post_process(crew_name, context)
         return artifact_path
 

@@ -34,6 +34,11 @@ foresight:
   crew_config: ./configs/crews/foresight_weaver.yaml
   timer_minutes: 1440
   idle_minutes: 240
+  min_timer_minutes: 120
+  min_idle_minutes: 60
+  relevance_thresholds:
+    high: 1.5
+    medium: 1.0
   trigger_mode: any
 evolution:
   enabled: true

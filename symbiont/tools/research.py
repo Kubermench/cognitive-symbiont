@@ -16,6 +16,22 @@ from symbiont.tools.files import ensure_dirs
 
 ARTIFACT_ROOT = Path("data/artifacts/foresight")
 
+FALLBACK_PROPOSAL_TEMPLATE = (
+    "# Foresight Update\n"
+    "- [ ] Summarize the newest signals\n"
+    "- [ ] Identify one follow-up experiment\n"
+    "- [ ] Share the briefing with the core team\n"
+)
+
+FALLBACK_VALIDATION = {
+    "approve": False,
+    "risk": 0.55,
+    "tests": [
+        "Gather additional corroborating sources",
+        "Review proposal with the foresight team",
+    ],
+}
+
 
 SOURCE_BOOSTS = {
     "arxiv": 1.2,
@@ -89,6 +105,30 @@ def _fetch_live_sources(query: str, max_items: int) -> list[Dict[str, Any]]:
             except Exception:
                 continue
     return items
+
+
+def build_fallback_proposal(topic: str, insight: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    highlight = (insight or {}).get("highlight") or (insight or {}).get("implication")
+    prefix = highlight[:80] if isinstance(highlight, str) else topic
+    proposal_text = (
+        f"Document and review the latest findings on {topic}."
+        if not prefix
+        else f"Document and review: {prefix}."
+    )
+    return {
+        "proposal": proposal_text[:200],
+        "diff": FALLBACK_PROPOSAL_TEMPLATE,
+    }
+
+
+def build_fallback_validation(proposal: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    validation = dict(FALLBACK_VALIDATION)
+    if proposal and proposal.get("proposal"):
+        validation["tests"] = [
+            f"Validate proposal: {str(proposal['proposal'])[:60]}",
+            "Review with foresight stakeholders",
+        ]
+    return validation
 
 
 def _save_source_plot(topic: str, stats: Dict[str, Dict[str, float]]) -> Optional[str]:
@@ -199,17 +239,24 @@ def scout_insights(llm: LLMClient, query: str, *, max_items: int = 3) -> Dict[st
         stat["avg_score"] = round(stat["score_total"] / count, 3)
         stat.pop("score_total", None)
 
+    min_score = 0.6
+    filtered = [item for item in ranked if float(item.get("score", 0.0)) >= min_score]
+    dropped = len(ranked) - len(filtered)
+    if not filtered and ranked:
+        filtered = ranked[:1]
+
     plot_path = _save_source_plot(topic, source_stats)
     meta = {
         "source_breakdown": source_stats,
         "total_candidates": len(ranked),
+        "dropped_low_score": dropped,
     }
     if plot_path:
         meta["source_plot"] = plot_path
 
     return {
         "topic": topic,
-        "items": ranked[:max_items],
+        "items": filtered[:max_items],
         "meta": meta,
     }
 
@@ -220,7 +267,10 @@ def analyze_insights(llm: LLMClient, topic: str, sources: Dict[str, Any]) -> Dic
         " Provide JSON with keys 'highlight' (concise insight) and 'implication' (actionable suggestion)."
         f" Topic: {topic}\nSources: {json.dumps(sources)[:1200]}"
     )
-    raw = llm.generate(prompt, label="research:analyze") or "{}"
+    try:
+        raw = llm.generate(prompt, label="research:analyze") or "{}"
+    except Exception:
+        raw = "{}"
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -257,7 +307,10 @@ def draft_proposal(llm: LLMClient, insight: Dict[str, Any]) -> Dict[str, Any]:
         f" Insight: {json.dumps(insight)[:800]}"
         " Keep diff under 100 lines and illustrative (no destructive changes)."
     )
-    raw = llm.generate(prompt, label="research:proposal") or "{}"
+    try:
+        raw = llm.generate(prompt, label="research:proposal") or "{}"
+    except Exception:
+        raw = "{}"
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -279,10 +332,10 @@ def draft_proposal(llm: LLMClient, insight: Dict[str, Any]) -> Dict[str, Any]:
                 f"- [ ] Draft follow-up experiments for {topic}\n"
             )
 
-    if not diff.strip():
-        diff = "# TODO: Provide diff"
-    if not proposal.strip():
-        proposal = "Investigate further."
+    if not diff.strip() or not proposal.strip():
+        fallback = build_fallback_proposal(insight.get("topic", "the focus area") if isinstance(insight, dict) else "foresight", insight if isinstance(insight, dict) else None)
+        proposal = fallback["proposal"]
+        diff = fallback["diff"]
     return {"proposal": proposal, "diff": diff}
 
 
@@ -292,7 +345,10 @@ def validate_proposal(llm: LLMClient, proposal: Dict[str, Any]) -> Dict[str, Any
         " Return JSON with keys 'approve' (bool), 'risk' (0-1 float), 'tests' (list of suggestions)."
         f" Proposal: {json.dumps(proposal)[:800]}"
     )
-    raw = llm.generate(prompt, label="research:validate") or "{}"
+    try:
+        raw = llm.generate(prompt, label="research:validate") or "{}"
+    except Exception:
+        raw = "{}"
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -319,4 +375,7 @@ def validate_proposal(llm: LLMClient, proposal: Dict[str, Any]) -> Dict[str, Any
 
     sanitized_tests = sanitized_tests[:3]
 
-    return {"approve": approve, "risk": max(0.0, min(1.0, risk)), "tests": sanitized_tests}
+    result = {"approve": approve, "risk": max(0.0, min(1.0, risk)), "tests": sanitized_tests}
+    if not sanitized_tests:
+        result = build_fallback_validation(proposal)
+    return result

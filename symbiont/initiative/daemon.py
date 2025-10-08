@@ -192,7 +192,8 @@ def _foresight_should_trigger(
     if not isinstance(foresight_cfg, dict) or not foresight_cfg.get("enabled", False):
         return False, ["foresight.disabled"], {}, state, now
 
-    interval = int(foresight_cfg.get("timer_minutes", 1440) or 1440)
+    base_interval = int(foresight_cfg.get("timer_minutes", 1440) or 1440)
+    interval = int(state.get("foresight_next_timer_minutes", base_interval) or base_interval)
     last_run = int(state.get("foresight_last_run_ts", 0))
     elapsed = now - last_run
     pending: List[str] = []
@@ -208,7 +209,8 @@ def _foresight_should_trigger(
             minutes = max(1, remaining // 60) if remaining else 1
             pending.append(f"foresight.wait<{minutes}m")
 
-    idle_minutes = int(foresight_cfg.get("idle_minutes", 0) or 0)
+    base_idle = int(foresight_cfg.get("idle_minutes", 0) or 0)
+    idle_minutes = int(state.get("foresight_next_idle_minutes", base_idle) or base_idle)
     idle_ok = True
     if idle_minutes > 0:
         repo_root = foresight_cfg.get("repo_path") or cfg.get("initiative", {}).get("repo_path", ".")
@@ -250,6 +252,7 @@ def _run_foresight(
         db = MemoryDB(cfg["db_path"])
         runner = CrewRunner(registry, cfg, db)
         artifact_path = runner.run(crew_name, goal)
+        run_context = getattr(runner, "last_context", {})
     except Exception as exc:
         _publish_event(
             cfg,
@@ -267,6 +270,42 @@ def _run_foresight(
     state["foresight_last_goal"] = goal
     state["foresight_last_artifact"] = str(artifact_path)
     state["last_proposal_ts"] = now
+
+    relevance_score = 0.0
+    try:
+        sources = run_context.get("foresight_sources", {}) if isinstance(run_context, dict) else {}
+        meta = sources.get("meta", {}) if isinstance(sources, dict) else {}
+        breakdown = meta.get("source_breakdown", {}) if isinstance(meta, dict) else {}
+        if breakdown:
+            relevance_score = max(
+                float(stat.get("avg_score", 0.0)) for stat in breakdown.values()
+            )
+    except Exception:
+        relevance_score = 0.0
+
+    thresholds_cfg = foresight_cfg.get("relevance_thresholds", {}) if isinstance(foresight_cfg, dict) else {}
+    high_threshold = float(thresholds_cfg.get("high", 1.5))
+    medium_threshold = float(thresholds_cfg.get("medium", 1.0))
+    base_timer = int(foresight_cfg.get("timer_minutes", 1440) or 1440)
+    min_timer = int(foresight_cfg.get("min_timer_minutes", base_timer) or base_timer)
+    base_idle = int(foresight_cfg.get("idle_minutes", 0) or 0)
+    min_idle = int(foresight_cfg.get("min_idle_minutes", base_idle) or base_idle)
+
+    next_timer = base_timer
+    next_idle = base_idle
+    if relevance_score >= high_threshold:
+        next_timer = max(min_timer, base_timer // 4 if base_timer >= 4 else min_timer)
+        if base_idle:
+            next_idle = max(min_idle, base_idle // 4 if base_idle >= 4 else min_idle)
+    elif relevance_score >= medium_threshold:
+        next_timer = max(min_timer, base_timer // 2 if base_timer >= 2 else min_timer)
+        if base_idle:
+            next_idle = max(min_idle, base_idle // 2 if base_idle >= 2 else min_idle)
+
+    state["foresight_next_timer_minutes"] = next_timer
+    if base_idle:
+        state["foresight_next_idle_minutes"] = next_idle
+    state["foresight_last_relevance"] = relevance_score
     _save_state(state)
 
     _publish_event(
@@ -277,6 +316,9 @@ def _run_foresight(
             "crew": crew_name,
             "artifact": str(artifact_path),
             "reasons": reasons,
+            "relevance": relevance_score,
+            "next_timer_minutes": next_timer,
+            "next_idle_minutes": next_idle if base_idle else None,
         },
     )
     return {
@@ -284,6 +326,9 @@ def _run_foresight(
         "goal": goal,
         "artifact": str(artifact_path),
         "reasons": reasons,
+        "relevance": relevance_score,
+        "next_timer_minutes": next_timer,
+        "next_idle_minutes": next_idle if base_idle else None,
     }
 
 

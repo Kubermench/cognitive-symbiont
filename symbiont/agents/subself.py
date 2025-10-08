@@ -21,6 +21,7 @@ class SubSelf(BaseAgent):
         self.name = role.get("name", "anon")
         self.goal = role.get("goal", "")
         self.style = role.get("style", "")
+        self.config = config or {}
         self.llm = llm_client or LLMClient((config or {}).get("llm", {}))
         self.token_budget = token_budget
 
@@ -473,7 +474,15 @@ Only bullets. No extra text.
         return {"role": self.name, "summary": summary, "risks": risks, "actions": actions, "metrics": data}
 
     def _foresight_scout(self, goal: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        budget = context.get("token_budget")
+        before_tokens = budget.used if budget else None
         insights = research.scout_insights(self.llm, goal)
+        if budget and before_tokens is not None:
+            delta = max(0, budget.used - before_tokens)
+            meta = insights.setdefault("meta", {}) if isinstance(insights, dict) else {}
+            meta["token_delta"] = delta
+            cost_rate = float(self.config.get("foresight", {}).get("token_cost_per_unit", 0.000002))
+            meta["cost_estimate"] = round(delta * cost_rate, 6)
         context["foresight_sources"] = insights
         return {"role": self.name, **insights}
 
@@ -486,12 +495,17 @@ Only bullets. No extra text.
     def _foresight_suggester(self, goal: str, context: Dict[str, Any]) -> Dict[str, Any]:
         analysis = context.get("foresight_analysis") or {"highlight": goal, "implication": "Investigate"}
         proposal = research.draft_proposal(self.llm, analysis)
+        if not proposal.get("proposal") or not proposal.get("diff"):
+            topic = analysis.get("topic", goal) if isinstance(analysis, dict) else goal
+            proposal = research.build_fallback_proposal(topic, analysis if isinstance(analysis, dict) else None)
         context["foresight_proposal"] = proposal
         return {"role": self.name, **proposal}
 
     def _foresight_validator(self, goal: str, context: Dict[str, Any]) -> Dict[str, Any]:
         proposal = context.get("foresight_proposal") or {"proposal": goal, "diff": "# noop"}
         validation = research.validate_proposal(self.llm, proposal)
+        if not validation.get("tests"):
+            validation = research.build_fallback_validation(proposal)
         context["foresight_validation"] = validation
         return {"role": self.name, **validation}
 
