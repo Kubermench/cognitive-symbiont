@@ -1,13 +1,25 @@
 from __future__ import annotations
 import os, time, json, subprocess
+from pathlib import Path
 from typing import Dict, Any, Tuple, List, Optional
 
 import logging
+from tenacity import (
+    RetryCallState,
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+    wait_fixed,
+)
 
 from ..orchestrator import Orchestrator
+from ..agents.registry import AgentRegistry, CrewRunner
+from ..memory.db import MemoryDB
 from ..tools.files import ensure_dirs
 from .watchers import RepoWatchConfig, build_repo_watch_configs
 from .pubsub import get_client
+from .state import get_state_store, resolve_node_id
 
 
 STATE_DIR = os.path.join("./data", "initiative")
@@ -23,17 +35,18 @@ def _load_state() -> Dict[str, Any]:
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-            data.setdefault("targets", {})
-            return data
     except Exception:
-        return {
-            "last_proposal_ts": 0,
-            "last_check_ts": 0,
-            "daemon_running": False,
-            "daemon_started_ts": 0,
-            "daemon_pid": 0,
-            "targets": {},
-        }
+        data = {}
+    data.setdefault("targets", {})
+    data.setdefault("last_proposal_ts", 0)
+    data.setdefault("last_check_ts", 0)
+    data.setdefault("daemon_running", False)
+    data.setdefault("daemon_started_ts", 0)
+    data.setdefault("daemon_pid", 0)
+    data.setdefault("foresight_last_run_ts", 0)
+    data.setdefault("foresight_last_goal", "")
+    data.setdefault("foresight_last_artifact", "")
+    return data
 
 
 def _save_state(st: Dict[str, Any]):
@@ -170,6 +183,110 @@ def _should_trigger(cfg: Dict[str, Any]) -> Tuple[bool, List[str], Optional[Repo
     return False, ["no_target_ready"], None
 
 
+def _foresight_should_trigger(
+    cfg: Dict[str, Any]
+) -> Tuple[bool, List[str], Dict[str, Any], Dict[str, Any], int]:
+    foresight_cfg = cfg.get("foresight")
+    state = _load_state()
+    now = _now()
+    if not isinstance(foresight_cfg, dict) or not foresight_cfg.get("enabled", False):
+        return False, ["foresight.disabled"], {}, state, now
+
+    interval = int(foresight_cfg.get("timer_minutes", 1440) or 1440)
+    last_run = int(state.get("foresight_last_run_ts", 0))
+    elapsed = now - last_run
+    pending: List[str] = []
+    reasons: List[str] = []
+
+    timer_ok = True
+    if interval > 0:
+        if elapsed >= interval * 60:
+            reasons.append(f"foresight.timer>={interval}m")
+        else:
+            timer_ok = False
+            remaining = max(0, (interval * 60) - elapsed)
+            minutes = max(1, remaining // 60) if remaining else 1
+            pending.append(f"foresight.wait<{minutes}m")
+
+    idle_minutes = int(foresight_cfg.get("idle_minutes", 0) or 0)
+    idle_ok = True
+    if idle_minutes > 0:
+        repo_root = foresight_cfg.get("repo_path") or cfg.get("initiative", {}).get("repo_path", ".")
+        latest = _latest_file_mtime(str(Path(repo_root).expanduser().resolve()))
+        if latest and (now - latest) < idle_minutes * 60:
+            idle_ok = False
+            pending.append(f"foresight.idle<{idle_minutes}m")
+        else:
+            reasons.append(f"foresight.idle>={idle_minutes}m")
+
+    trigger_mode = str(foresight_cfg.get("trigger_mode", "any") or "any").lower()
+    if trigger_mode == "idle_and_timer":
+        due = timer_ok and idle_ok
+    else:
+        due = timer_ok or idle_ok
+
+    if due:
+        if not reasons:
+            reasons.append("foresight.manual")
+        return True, reasons, foresight_cfg, state, now
+
+    return False, (pending or reasons or ["foresight.not_due"]), foresight_cfg, state, now
+
+
+def _run_foresight(
+    cfg: Dict[str, Any],
+    foresight_cfg: Dict[str, Any],
+    state: Dict[str, Any],
+    now: int,
+    reasons: List[str],
+) -> Dict[str, Any]:
+    crew_name = foresight_cfg.get("crew", "foresight_weaver")
+    goal = foresight_cfg.get("goal", "Emerging agentic AI trends")
+    crew_config_path = foresight_cfg.get("crew_config") or foresight_cfg.get("crews_path") or "./configs/crews/foresight_weaver.yaml"
+    crews_file = Path(crew_config_path).expanduser().resolve()
+
+    try:
+        registry = AgentRegistry.from_yaml(crews_file)
+        db = MemoryDB(cfg["db_path"])
+        runner = CrewRunner(registry, cfg, db)
+        artifact_path = runner.run(crew_name, goal)
+    except Exception as exc:
+        _publish_event(
+            cfg,
+            {
+                "type": "foresight.error",
+                "goal": goal,
+                "crew": crew_name,
+                "reasons": reasons,
+                "error": str(exc),
+            },
+        )
+        raise
+
+    state["foresight_last_run_ts"] = now
+    state["foresight_last_goal"] = goal
+    state["foresight_last_artifact"] = str(artifact_path)
+    state["last_proposal_ts"] = now
+    _save_state(state)
+
+    _publish_event(
+        cfg,
+        {
+            "type": "foresight.run",
+            "goal": goal,
+            "crew": crew_name,
+            "artifact": str(artifact_path),
+            "reasons": reasons,
+        },
+    )
+    return {
+        "crew": crew_name,
+        "goal": goal,
+        "artifact": str(artifact_path),
+        "reasons": reasons,
+    }
+
+
 def _retry(
     operation,
     *,
@@ -178,33 +295,44 @@ def _retry(
     backoff: float = 2.0,
     sleep_fn = time.sleep,
 ):
-    """Retry *operation* with simple exponential backoff.
-
-    Keeps delays short by default (1s, 2s, 4s) and re-raises the
-    final exception so callers can surface context to the user.
-    """
+    """Retry *operation* with exponential backoff via tenacity."""
 
     if attempts <= 0:
         raise ValueError("attempts must be positive")
 
-    delay = max(0.0, float(base_delay))
-    factor = max(1.0, float(backoff))
-    last_exc: Exception | None = None
+    multiplier = max(0.0, float(base_delay))
+    exp_base = max(1.0, float(backoff))
+    max_wait = max(multiplier, multiplier * (exp_base ** max(0, attempts - 1)))
 
-    for remaining in range(attempts):
-        try:
-            return operation()
-        except Exception as exc:  # pragma: no cover - raised in tests to assert behaviour
-            last_exc = exc
-            if remaining == attempts - 1:
-                break
-            if delay > 0:
-                sleep_fn(delay)
-            delay *= factor
+    def _log_retry(state: RetryCallState) -> None:
+        exc = state.outcome.exception() if state.outcome else None
+        if exc:
+            logger.warning(
+                "Retry %s/%s failed: %s",
+                state.attempt_number,
+                attempts,
+                exc,
+            )
 
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("retry failed without raising")
+    if multiplier <= 0:
+        wait_strategy = wait_fixed(0)
+    else:
+        wait_strategy = wait_exponential(
+            multiplier=multiplier,
+            exp_base=exp_base,
+            min=multiplier,
+            max=max_wait,
+        )
+
+    retryer = Retrying(
+        retry=retry_if_exception_type(Exception),
+        stop=stop_after_attempt(attempts),
+        wait=wait_strategy,
+        sleep=sleep_fn,
+        reraise=True,
+        before_sleep=_log_retry,
+    )
+    return retryer(operation)
 
 
 def propose_once(cfg: Dict[str, Any], reason: str = "watchers", *, target: RepoWatchConfig | None = None) -> Dict[str, Any]:
@@ -254,36 +382,43 @@ def propose_once(cfg: Dict[str, Any], reason: str = "watchers", *, target: RepoW
 
 def run_once_if_triggered(cfg: Dict[str, Any]) -> Tuple[bool, List[str], Dict[str, Any] | None, Optional[RepoWatchConfig]]:
     ok, reasons, target = _should_trigger(cfg)
-    if not ok:
+    if ok:
+        res = propose_once(cfg, reason=",".join(reasons), target=target)
+        st = _load_state()
+        now = _now()
+        st["last_proposal_ts"] = now
+        st["last_check_ts"] = now
+        if target is not None:
+            path = str(target.path)
+            st.setdefault("targets", {}).setdefault(path, {"last_proposal": 0, "last_check": 0})
+            st["targets"][path]["last_proposal"] = now
+            st["targets"][path]["last_check"] = now
+        _save_state(st)
         _publish_event(
             cfg,
             {
-                "type": "initiative.idle",
-                "reasons": reasons,
+                "type": "initiative.proposal",
+                "reason": ",".join(reasons),
+                "goal": res.get("goal") if isinstance(res, dict) else None,
+                "target": str(target.path) if target else None,
             },
         )
-        return False, reasons, None, target
-    res = propose_once(cfg, reason=",".join(reasons), target=target)
-    st = _load_state()
-    now = _now()
-    st["last_proposal_ts"] = now
-    st["last_check_ts"] = now
-    if target is not None:
-        path = str(target.path)
-        st.setdefault("targets", {}).setdefault(path, {"last_proposal": 0, "last_check": 0})
-        st["targets"][path]["last_proposal"] = now
-        st["targets"][path]["last_check"] = now
-    _save_state(st)
+        return True, reasons, res, target
+
+    foresight_ok, foresight_reasons, foresight_cfg, foresight_state, now = _foresight_should_trigger(cfg)
+    if foresight_ok:
+        result = _run_foresight(cfg, foresight_cfg, foresight_state, now, foresight_reasons)
+        return True, foresight_reasons, result, None
+
+    combined_reasons = reasons + foresight_reasons
     _publish_event(
         cfg,
         {
-            "type": "initiative.proposal",
-            "reason": ",".join(reasons),
-            "goal": res.get("goal") if isinstance(res, dict) else None,
-            "target": str(target.path) if target else None,
+            "type": "initiative.idle",
+            "reasons": combined_reasons,
         },
     )
-    return True, reasons, res, target
+    return False, combined_reasons, None, target
 
 
 def daemon_loop(cfg: Dict[str, Any], poll_seconds: int = 60):
@@ -297,13 +432,53 @@ def daemon_loop(cfg: Dict[str, Any], poll_seconds: int = 60):
         "daemon_pid": os.getpid(),
     })
     _save_state(st)
+
+    store = get_state_store(cfg)
+    node_id = resolve_node_id(cfg)
+    store.record_daemon(
+        node_id=node_id,
+        pid=os.getpid(),
+        status="running",
+        poll_seconds=poll_seconds,
+        last_check_ts=int(st.get("last_check_ts", 0)),
+        last_proposal_ts=int(st.get("last_proposal_ts", 0)),
+        details={
+            "startup": True,
+            "started_ts": int(st.get("daemon_started_ts", _now())),
+        },
+    )
+
+    retry_cfg = (cfg.get("initiative") or {}).get("retry", {})
+    daemon_attempts = max(1, int(retry_cfg.get("attempts", 3) or 3))
+    daemon_base = max(0.1, float(retry_cfg.get("base_delay", 1.0) or 1.0))
+    daemon_backoff = max(1.0, float(retry_cfg.get("backoff", 2.0) or 2.0))
+
     while True:
         try:
-            ok, reasons, _, target = run_once_if_triggered(cfg)
+            ok, reasons, _, target = _retry(
+                lambda: run_once_if_triggered(cfg),
+                attempts=daemon_attempts,
+                base_delay=daemon_base,
+                backoff=daemon_backoff,
+            )
             now = _now()
             st = _load_state()
             st["last_check_ts"] = now
             _save_state(st)
+            store.record_daemon(
+                node_id=node_id,
+                pid=os.getpid(),
+                status="running",
+                poll_seconds=poll_seconds,
+                last_check_ts=now,
+                last_proposal_ts=int(st.get("last_proposal_ts", 0)),
+                details={
+                    "ok": bool(ok),
+                    "reasons": reasons,
+                    "target": str(getattr(target, "path", "")) if target else None,
+                    "started_ts": int(st.get("daemon_started_ts", now)),
+                },
+            )
             if ok:
                 repo_msg = f" repo={getattr(target, 'path', '?')}" if target else ""
                 print("[initiative] proposed (reasons:", ",".join(reasons), ")" + repo_msg)
@@ -315,13 +490,47 @@ def daemon_loop(cfg: Dict[str, Any], poll_seconds: int = 60):
             break
         except Exception as e:
             print("[initiative] error:", e)
+            store.record_daemon(
+                node_id=node_id,
+                pid=os.getpid(),
+                status="error",
+                poll_seconds=poll_seconds,
+                last_check_ts=_now(),
+                last_proposal_ts=int(st.get("last_proposal_ts", 0)),
+                details={
+                    "error": str(e),
+                    "started_ts": int(st.get("daemon_started_ts", _now())),
+                },
+            )
+            time.sleep(daemon_base)
+            continue
         time.sleep(poll_seconds)
     st = _load_state()
     st.update({"daemon_running": False})
     _save_state(st)
+    store.mark_daemon_stopped(node_id)
 
 
-def get_status() -> Dict[str, Any]:
+def get_status(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    try:
+        store = get_state_store(cfg)
+        node_id = resolve_node_id(cfg)
+        current = store.load_daemon(node_id)
+    except Exception:
+        current = None
+
+    if current:
+        return {
+            "last_check_ts": int(current.get("last_check_ts") or 0),
+            "last_proposal_ts": int(current.get("last_proposal_ts") or 0),
+            "daemon_running": current.get("status") in {"running", "error"},
+            "daemon_started_ts": int(current.get("details", {}).get("started_ts", 0) or 0),
+            "daemon_pid": int(current.get("pid") or 0),
+            "state_path": os.path.abspath(STATE_PATH),
+            "status": current.get("status"),
+            "node_id": current.get("node_id"),
+        }
+
     st = _load_state()
     return {
         "last_check_ts": int(st.get("last_check_ts", 0)),

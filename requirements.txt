@@ -13,3 +13,7 @@ requests==2.32.3
 PyGithub==2.4.0
 pytest==8.3.2
 pytest-cov==5.0.0
+tenacity==8.2.3
+hypothesis==6.112.1
+prometheus-client==0.20.0
+feedparser==6.0.10
