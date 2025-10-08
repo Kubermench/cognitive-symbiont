@@ -6,7 +6,7 @@ consensus:
   min_agree: 2
   require_critic_ok: true
 initiative:
-  enabled: false
+  enabled: true
   repo_path: .
   watchers:
   - file
@@ -23,7 +23,7 @@ initiative:
     path: ./data/initiative/state.db
     swarm_ttl_seconds: 600
   pubsub:
-    enabled: false
+    enabled: true
     backend: memory  # memory | redis
     channel: symbiont:initiative
     log_path: ./data/initiative/events.jsonl
