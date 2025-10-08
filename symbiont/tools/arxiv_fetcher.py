@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import datetime as _dt
-import json
+import threading
+import time
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import List
 
 import feedparser
 import requests
@@ -13,6 +14,12 @@ import requests
 
 API_URL = "https://export.arxiv.org/api/query"
 USER_AGENT = "symbiont-foresight/1.0"
+API_TIMEOUT = 10
+RATE_LIMIT_SECONDS = 2.0  # Keep at most ~30 requests/minute (well under arXiv guidelines).
+
+_SESSION = requests.Session()
+_RATE_LOCK = threading.Lock()
+_LAST_REQUEST_AT = 0.0
 
 
 @dataclass
@@ -53,6 +60,19 @@ def _parse_entry(entry: dict) -> ArxivResult:
     return ArxivResult(title=title, summary=summary, link=link, published=published, authors=authors)
 
 
+def _throttle_requests() -> None:
+    """Rate-limit outbound API calls to stay within arXiv guidelines."""
+
+    global _LAST_REQUEST_AT
+    with _RATE_LOCK:
+        now = time.monotonic()
+        wait = RATE_LIMIT_SECONDS - (now - _LAST_REQUEST_AT)
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _LAST_REQUEST_AT = now
+
+
 def search_arxiv(query: str, *, max_results: int = 5) -> List[ArxivResult]:
     params = {
         "search_query": query,
@@ -62,8 +82,12 @@ def search_arxiv(query: str, *, max_results: int = 5) -> List[ArxivResult]:
         "sortOrder": "descending",
     }
     headers = {"User-Agent": USER_AGENT}
-    resp = requests.get(API_URL, params=params, headers=headers, timeout=10)
-    resp.raise_for_status()
+    _throttle_requests()
+    try:
+        resp = _SESSION.get(API_URL, params=params, headers=headers, timeout=API_TIMEOUT)
+        resp.raise_for_status()
+    except requests.RequestException:
+        return []
     parsed = feedparser.parse(resp.text)
     entries = parsed.get("entries", [])
     results: List[ArxivResult] = []

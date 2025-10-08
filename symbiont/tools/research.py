@@ -3,10 +3,128 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from symbiont.llm.client import LLMClient
 from symbiont.tools.arxiv_fetcher import search_arxiv
+from symbiont.tools.files import ensure_dirs
+
+
+ARTIFACT_ROOT = Path("data/artifacts/foresight")
+
+
+SOURCE_BOOSTS = {
+    "arxiv": 1.2,
+    "x": 0.8,
+    "web": 0.7,
+    "llm": 0.4,
+}
+
+
+def _keyword_tokens(text: str) -> set[str]:
+    return {tok.strip().lower() for tok in text.split() if tok and len(tok) > 3}
+
+
+def _score_item(item: Dict[str, Any], query: str) -> float:
+    score = 0.0
+    source = str(item.get("source", "")).lower()
+    boost = SOURCE_BOOSTS.get(source, 0.5)
+    score += boost
+
+    q_tokens = _keyword_tokens(query)
+    title_tokens = _keyword_tokens(item.get("title", ""))
+    summary_tokens = _keyword_tokens(item.get("summary", ""))
+    overlap = len(q_tokens & (title_tokens | summary_tokens))
+    if overlap:
+        score += 0.2 * overlap
+
+    published = str(item.get("published", ""))
+    if published:
+        try:
+            pub_dt = datetime.strptime(published[:10], "%Y-%m-%d")
+            age_days = max(1, (datetime.utcnow() - pub_dt).days)
+            score += max(0.0, 0.8 - (age_days / 365))
+        except Exception:
+            score += 0.1
+
+    summary_len = len(item.get("summary", ""))
+    if summary_len and summary_len < 500:
+        score += 0.1
+    return round(score, 3)
+
+
+def _fetch_live_sources(query: str, max_items: int) -> list[Dict[str, Any]]:
+    adapters = []
+
+    def fetch_arxiv() -> list[Dict[str, Any]]:
+        results = search_arxiv(query, max_results=max_items)
+        payload: list[Dict[str, Any]] = []
+        for result in results:
+            payload.append(
+                {
+                    "title": result.title[:140],
+                    "url": result.link[:240],
+                    "summary": result.summary[:200],
+                    "source": "arXiv",
+                    "published": result.published,
+                }
+            )
+        return payload
+
+    adapters.append(fetch_arxiv)
+
+    items: list[Dict[str, Any]] = []
+    if not adapters:
+        return items
+
+    with ThreadPoolExecutor(max_workers=len(adapters)) as executor:
+        future_map = {executor.submit(adapter): adapter for adapter in adapters}
+        for future in as_completed(future_map):
+            try:
+                items.extend(future.result() or [])
+            except Exception:
+                continue
+    return items
+
+
+def _save_source_plot(topic: str, stats: Dict[str, Dict[str, float]]) -> Optional[str]:
+    if not stats:
+        return None
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    labels = list(stats.keys())
+    counts = [stat.get("count", 0) for stat in stats.values()]
+    avgs = [stat.get("avg_score", 0.0) for stat in stats.values()]
+    if not any(counts):
+        return None
+
+    ensure_dirs([ARTIFACT_ROOT])
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in topic) or "foresight"
+    slug = slug[:40].strip("-") or "foresight"
+    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    path = ARTIFACT_ROOT / f"{ts}_sources.png"
+
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    bars = ax.bar(labels, counts, color="#4b9cd3")
+    ax.set_title(f"Source mix for {topic[:40]}")
+    ax.set_ylabel("Items")
+    ax.set_ylim(0, max(counts) * 1.2)
+    for bar, avg in zip(bars, avgs):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width() / 2, height + 0.05, f"avg={avg:.2f}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    try:
+        fig.savefig(path, dpi=150)
+    finally:
+        plt.close(fig)
+    return str(path)
 
 
 def scout_insights(llm: LLMClient, query: str, *, max_items: int = 3) -> Dict[str, Any]:
@@ -27,7 +145,7 @@ def scout_insights(llm: LLMClient, query: str, *, max_items: int = 3) -> Dict[st
         data = {}
 
     # Normalize LLM-provided items first so we can merge with live sources.
-    normalized: list[dict[str, str]] = []
+    normalized: list[dict[str, Any]] = []
     items = data.get("items") if isinstance(data, dict) else []
     if isinstance(items, list):
         for item in items:
@@ -45,23 +163,15 @@ def scout_insights(llm: LLMClient, query: str, *, max_items: int = 3) -> Dict[st
 
     # Always enrich with live arXiv results so the scout has real sources.
     try:
-        arxiv_results = search_arxiv(query, max_results=max_items)
+        live_items = _fetch_live_sources(query, max_items)
     except Exception:
-        arxiv_results = []
-    for result in arxiv_results:
-        normalized.append(
-            {
-                "title": result.title[:140],
-                "url": result.link[:240],
-                "summary": result.summary[:200],
-                "source": "arXiv",
-                "published": result.published[:32],
-            }
-        )
+        live_items = []
+    for result in live_items:
+        normalized.append(result)
 
     # Deduplicate by URL/title pair while preserving order.
     seen: set[tuple[str, str]] = set()
-    merged: list[dict[str, str]] = []
+    merged: list[dict[str, Any]] = []
     for item in normalized:
         key = (item.get("url", ""), item.get("title", ""))
         if key in seen:
@@ -69,11 +179,39 @@ def scout_insights(llm: LLMClient, query: str, *, max_items: int = 3) -> Dict[st
         seen.add(key)
         merged.append(item)
 
+    for entry in merged:
+        entry["score"] = _score_item(entry, query)
+
     topic = data.get("topic") if isinstance(data, dict) else None
     if not isinstance(topic, str) or not topic:
         topic = query
+    ranked = sorted(merged, key=lambda item: item.get("score", 0.0), reverse=True)
 
-    return {"topic": topic, "items": merged[:max_items]}
+    source_stats: Dict[str, Dict[str, float]] = {}
+    for entry in ranked:
+        source = str(entry.get("source", "unknown")).lower() or "unknown"
+        stat = source_stats.setdefault(source, {"count": 0, "score_total": 0.0})
+        stat["count"] += 1
+        stat["score_total"] += float(entry.get("score", 0.0))
+
+    for source, stat in source_stats.items():
+        count = stat.get("count", 1) or 1
+        stat["avg_score"] = round(stat["score_total"] / count, 3)
+        stat.pop("score_total", None)
+
+    plot_path = _save_source_plot(topic, source_stats)
+    meta = {
+        "source_breakdown": source_stats,
+        "total_candidates": len(ranked),
+    }
+    if plot_path:
+        meta["source_plot"] = plot_path
+
+    return {
+        "topic": topic,
+        "items": ranked[:max_items],
+        "meta": meta,
+    }
 
 
 def analyze_insights(llm: LLMClient, topic: str, sources: Dict[str, Any]) -> Dict[str, Any]:
