@@ -14,6 +14,7 @@ from .subself import SubSelf
 from ..llm.client import LLMClient
 from ..llm.budget import TokenBudget
 from ..memory.db import MemoryDB
+from ..memory.embedder import cheap_embed
 from ..tools import scriptify, systems_os
 from ..orchestration.schema import CrewFileModel
 
@@ -239,6 +240,75 @@ class CrewRunner:
         self._post_process(crew_name, context)
         return artifact_path
 
+    def _store_artifact(self, artifact_type: str, path: Path, summary: str) -> None:
+        summary_text = (summary or "").strip() or path.name
+        with self.db._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO artifacts (task_id, type, path, summary, created_at) VALUES (?,?,?,?,strftime('%s','now'))",
+                (None, artifact_type, str(path), summary_text[:240]),
+            )
+            artifact_id = cur.lastrowid
+            embedding = cheap_embed([summary_text])[0]
+            conn.execute(
+                "INSERT INTO vectors (kind, ref_table, ref_id, embedding) VALUES (?, ?, ?, ?)",
+                ("artifact", "artifacts", artifact_id, json.dumps(embedding)),
+            )
+
+    def _record_foresight_artifacts(self, context: Dict[str, Any]) -> None:
+        sources = context.get("foresight_sources")
+        if not isinstance(sources, dict):
+            return
+        meta = sources.get("meta")
+        if not isinstance(meta, dict) or not meta:
+            return
+
+        topic = sources.get("topic") or context.get("goal") or "foresight"
+        meta_dir = Path("data/artifacts/foresight/meta")
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc)
+        plot_path = meta.get("source_plot") if isinstance(meta.get("source_plot"), str) else None
+        if plot_path:
+            meta["source_plot"] = str(Path(plot_path))
+
+        meta_payload = {
+            "timestamp": timestamp.isoformat(),
+            "topic": topic,
+            "goal": context.get("goal"),
+            "meta": meta,
+        }
+        meta_path = meta_dir / f"{timestamp.strftime('%Y%m%d%H%M%S')}_meta.json"
+        meta_path.write_text(json.dumps(meta_payload, indent=2), encoding="utf-8")
+
+        breakdown = meta.get("source_breakdown") if isinstance(meta.get("source_breakdown"), dict) else {}
+        summary_parts = [
+            f"topic={topic}",
+            f"total={meta.get('total_candidates', 0)}",
+            f"dropped={meta.get('dropped_low_score', 0)}",
+        ]
+        if meta.get("token_delta") is not None:
+            summary_parts.append(f"tokens={meta.get('token_delta')}")
+        if meta.get("cost_estimate") is not None:
+            summary_parts.append(f"cost={meta.get('cost_estimate')}")
+        if breakdown:
+            summary_parts.append(
+                "sources="
+                + ",".join(f"{src}:{info.get('count', 0)}" for src, info in breakdown.items())
+            )
+        summary = " ".join(summary_parts)
+        self._store_artifact("foresight_meta", meta_path, summary)
+
+        plot_path = meta.get("source_plot")
+        if isinstance(plot_path, str) and plot_path:
+            plot_file = Path(plot_path)
+            if not plot_file.is_absolute():
+                plot_file = Path(plot_path)
+            if plot_file.exists():
+                self._store_artifact(
+                    "foresight_plot",
+                    plot_file,
+                    f"Source mix chart for {topic}",
+                )
+
     def _persist_outputs(self, crew_name: str, goal: str, outputs: list[dict[str, Any]]) -> Path:
         import time
 
@@ -335,3 +405,4 @@ class CrewRunner:
                 approval=approval[:40],
             )
             systems_os.append_markdown("Foresight.md", [row])
+            self._record_foresight_artifacts(context)

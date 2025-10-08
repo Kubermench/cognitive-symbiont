@@ -93,6 +93,9 @@ voice:
   stt: none
   tts: say
   wake_word: symbiont
+sources:
+  limits:
+    arxiv: 30
 guard:
   auto_approve_safe: false
   judge:

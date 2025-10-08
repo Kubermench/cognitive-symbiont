@@ -21,8 +21,8 @@ db = MemoryDB(db_path=cfg["db_path"]); db.ensure_schema()
 
 st.title("🧠 Symbiont BigKit v3.0-alpha")
 
-tab_cycles, tab_memory, tab_beliefs, tab_governance, tab_agency, tab_ports = st.tabs([
-    "Cycles", "Memory", "Beliefs", "Governance", "Agency", "Ports"
+tab_cycles, tab_memory, tab_beliefs, tab_governance, tab_foresight, tab_agency, tab_ports = st.tabs([
+    "Cycles", "Memory", "Beliefs", "Governance", "Foresight", "Agency", "Ports"
 ])
 
 with tab_cycles:
@@ -146,3 +146,58 @@ with tab_governance:
             body.append(json.dumps(history[-10:], indent=2))
         report_path.write_text("\n\n".join(body), encoding="utf-8")
         st.success(f"Compliance report saved to {report_path}")
+
+with tab_foresight:
+    st.subheader("Foresight Hunts")
+    meta_dir = Path("data/artifacts/foresight/meta")
+    records = []
+    if meta_dir.exists():
+        for path in sorted(meta_dir.glob("*_meta.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            meta = payload.get("meta", {}) or {}
+            breakdown = meta.get("source_breakdown", {}) if isinstance(meta.get("source_breakdown"), dict) else {}
+            records.append(
+                {
+                    "Timestamp": payload.get("timestamp"),
+                    "Topic": payload.get("topic"),
+                    "Total": meta.get("total_candidates"),
+                    "Dropped": meta.get("dropped_low_score"),
+                    "Tokens": meta.get("token_delta"),
+                    "Cost": meta.get("cost_estimate"),
+                    "Sources": ", ".join(f"{src}:{info.get('count', 0)}" for src, info in breakdown.items()),
+                    "Meta Path": str(path),
+                    "Plot Path": meta.get("source_plot"),
+                    "_breakdown": breakdown,
+                }
+            )
+
+    if records:
+        st.dataframe(records[::-1], use_container_width=True)
+        chart_data = {
+            "cost": [float(r.get("Cost") or 0.0) for r in records],
+            "tokens": [float(r.get("Tokens") or 0.0) for r in records],
+        }
+        st.markdown("### Cost & Token Trend")
+        st.line_chart(chart_data)
+
+        latest = records[-1]
+        st.markdown("### Latest Source Mix")
+        breakdown = latest.get("_breakdown", {})
+        if breakdown:
+            breakdown_rows = [
+                {
+                    "source": src,
+                    "count": info.get("count", 0),
+                    "avg_score": info.get("avg_score", 0.0),
+                }
+                for src, info in breakdown.items()
+            ]
+            st.table(breakdown_rows)
+        plot_path = latest.get("Plot Path")
+        if plot_path and Path(plot_path).exists():
+            st.image(str(plot_path), caption="Source distribution", use_column_width=True)
+    else:
+        st.info("No foresight hunts recorded yet.")

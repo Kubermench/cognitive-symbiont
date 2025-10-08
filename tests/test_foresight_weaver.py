@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 
 import yaml
@@ -6,7 +7,7 @@ import yaml
 from symbiont.agents.registry import AgentRegistry, CrewRunner
 from symbiont.llm.client import LLMClient
 from symbiont.memory.db import MemoryDB
-from symbiont.tools import systems_os
+from symbiont.tools import research, systems_os
 
 
 def test_foresight_weaver_creates_log(monkeypatch, tmp_path):
@@ -67,5 +68,96 @@ def test_foresight_weaver_creates_log(monkeypatch, tmp_path):
 
     log = (systems_dir / "Foresight.md").read_text(encoding="utf-8")
     assert "Continual pretraining" in log
+
+    systems_os.SYSTEMS_ROOT = original_root  # type: ignore
+
+
+def test_foresight_metadata_artifacts(monkeypatch, tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    systems_dir = tmp_path / "systems"
+    systems_dir.mkdir()
+    (systems_dir / "Foresight.md").write_text(
+        "## Foresight Research Log\n\n| Date | Topic | Highlight | Proposal | Approval |\n|------|-------|-----------|----------|----------|\n",
+        encoding="utf-8",
+    )
+    original_root = systems_os.SYSTEMS_ROOT
+    systems_os.SYSTEMS_ROOT = systems_dir  # type: ignore
+
+    plot_path = tmp_path / "plot.png"
+    plot_path.write_bytes(b"fake")
+
+    def fake_scout(llm, goal, max_items=3):
+        return {
+            "topic": "Metadata Test",
+            "items": [
+                {
+                    "title": "Signal",
+                    "url": "https://example.com/signal",
+                    "summary": "High quality source",
+                }
+            ],
+            "meta": {
+                "token_delta": 42,
+                "cost_estimate": 0.0123,
+                "total_candidates": 2,
+                "dropped_low_score": 1,
+                "source_breakdown": {"arxiv": {"count": 1, "avg_score": 1.2}},
+                "source_plot": str(plot_path),
+            },
+        }
+
+    def fake_analyze(llm, topic, sources):
+        return {"topic": topic, "highlight": "Insight", "implication": "Act"}
+
+    def fake_proposal(llm, insight):
+        return {"proposal": "", "diff": ""}
+
+    def fake_validate(llm, proposal):
+        return {"approve": False, "risk": 0.7, "tests": []}
+
+    monkeypatch.setattr(research, "scout_insights", fake_scout)
+    monkeypatch.setattr(research, "analyze_insights", fake_analyze)
+    monkeypatch.setattr(research, "draft_proposal", fake_proposal)
+    monkeypatch.setattr(research, "validate_proposal", fake_validate)
+
+    cfg = {"db_path": str(tmp_path / "sym.db"), "llm": {}}
+    crew_yaml = repo_root / "configs/crews/foresight_weaver.yaml"
+    registry = AgentRegistry.from_yaml(crew_yaml)
+    db = MemoryDB(cfg["db_path"])
+    runner = CrewRunner(registry, cfg, db)
+
+    monkeypatch.chdir(tmp_path)
+    artifact_path = runner.run("foresight_weaver", "Goal Meta")
+
+    meta_dir = Path("data/artifacts/foresight/meta")
+    meta_files = sorted(meta_dir.glob("*_meta.json"))
+    assert meta_files, "expected foresight meta artifact"
+    meta_payload = json.loads(meta_files[-1].read_text(encoding="utf-8"))
+    assert meta_payload["meta"].get("token_delta") is not None
+    assert meta_payload["meta"]["dropped_low_score"] == 1
+    breakdown = meta_payload["meta"].get("source_breakdown", {})
+    assert breakdown.get("arxiv", {}).get("count") == 1
+
+    with sqlite3.connect(cfg["db_path"]) as conn:
+        rows = conn.execute(
+            "SELECT id, summary FROM artifacts WHERE type='foresight_meta' ORDER BY id DESC"
+        ).fetchall()
+        assert rows, "artifact summary missing"
+        summary = rows[0][1]
+        assert "tokens=" in summary
+
+        vector_rows = conn.execute(
+            "SELECT ref_id FROM vectors WHERE ref_table='artifacts' AND kind='artifact' ORDER BY id DESC"
+        ).fetchall()
+        assert any(r[0] == rows[0][0] for r in vector_rows), "embedding not stored"
+
+    crew_payload = json.loads(Path(artifact_path).read_text(encoding="utf-8"))
+    suggester_output = next(
+        (entry for entry in crew_payload["outputs"] if entry["agent"] == "foresight_suggester_agent"),
+        None,
+    )
+    assert suggester_output is not None
+    proposal = suggester_output["result"].get("proposal", "")
+    assert "Document and review" in proposal  # fallback engaged
 
     systems_os.SYSTEMS_ROOT = original_root  # type: ignore
