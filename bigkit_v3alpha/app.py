@@ -165,12 +165,15 @@ with tab_foresight:
                     "Topic": payload.get("topic"),
                     "Total": meta.get("total_candidates"),
                     "Dropped": meta.get("dropped_low_score"),
+                    "Deduped": meta.get("deduped_triples"),
                     "Tokens": meta.get("token_delta"),
                     "Cost": meta.get("cost_estimate"),
+                    "Contributors": ", ".join(meta.get("contributors", [])),
                     "Sources": ", ".join(f"{src}:{info.get('count', 0)}" for src, info in breakdown.items()),
                     "Meta Path": str(path),
                     "Plot Path": meta.get("source_plot"),
                     "_breakdown": breakdown,
+                    "_meta": meta,
                 }
             )
 
@@ -184,6 +187,16 @@ with tab_foresight:
         st.line_chart(chart_data)
 
         latest = records[-1]
+        latest_meta = latest.get("_meta", {})
+        st.markdown("### Latest Hunt Metrics")
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("Total Candidates", latest_meta.get("total_candidates", 0))
+        metric_cols[1].metric("Deduped Triples", latest_meta.get("deduped_triples", 0))
+        metric_cols[2].metric("Dropped Low Score", latest_meta.get("dropped_low_score", 0))
+        contributors = latest_meta.get("contributors")
+        if contributors:
+            st.caption("Contributors: " + ", ".join(contributors))
+
         st.markdown("### Latest Source Mix")
         breakdown = latest.get("_breakdown", {})
         if breakdown:

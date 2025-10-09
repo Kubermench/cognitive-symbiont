@@ -40,6 +40,13 @@ foresight:
     high: 1.5
     medium: 1.0
   trigger_mode: any
+  collaboration:
+    enabled: true
+    models:
+      - grok
+      - devin
+    max_items: 2
+    llm_override: {}
 evolution:
   enabled: true
   repeat_threshold: 3

@@ -7,6 +7,7 @@ from ..llm.client import LLMClient
 from ..llm.budget import TokenBudget
 from ..memory import retrieval
 import os, json, re
+from collections import Counter
 
 class SubSelf(BaseAgent):
     def __init__(
@@ -498,6 +499,46 @@ Only bullets. No extra text.
         if not proposal.get("proposal") or not proposal.get("diff"):
             topic = analysis.get("topic", goal) if isinstance(analysis, dict) else goal
             proposal = research.build_fallback_proposal(topic, analysis if isinstance(analysis, dict) else None)
+
+        foresight_cfg = (self.config.get("foresight") or {})
+        collaboration_cfg = foresight_cfg.get("collaboration") or {}
+        sources = context.get("foresight_sources") or {}
+        items = sources.get("items") if isinstance(sources, dict) else []
+        peer_votes: List[Dict[str, Any]] = []
+        approve_threshold = float(collaboration_cfg.get("approve_threshold", 0.5))
+        if isinstance(items, list):
+            for entry in items:
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get("source", "")).lower() != "peer":
+                    continue
+                peer_name = str(entry.get("peer") or entry.get("source") or "peer")
+                support = float(entry.get("peer_support", 0.0))
+                vote_value = "approve" if support >= approve_threshold else "reject"
+                peer_votes.append(
+                    {
+                        "peer": peer_name,
+                        "vote": vote_value,
+                        "support": round(support, 3),
+                    }
+                )
+
+        if peer_votes:
+            vote_counts = Counter(vote["vote"] for vote in peer_votes)
+            top_vote, top_count = vote_counts.most_common(1)[0]
+            total_votes = len(peer_votes)
+            consensus_ratio = top_count / total_votes if total_votes else 0.0
+            proposal["peer_votes"] = peer_votes
+            proposal["peer_consensus"] = {
+                "vote": top_vote,
+                "confidence": round(consensus_ratio, 3),
+                "total": total_votes,
+            }
+            proposal.setdefault("status", "consensus" if consensus_ratio >= 0.6 else "disputed")
+            if consensus_ratio < 0.6:
+                proposal["status"] = "disputed"
+            elif top_vote != "approve":
+                proposal["status"] = "rejected"
         context["foresight_proposal"] = proposal
         return {"role": self.name, **proposal}
 

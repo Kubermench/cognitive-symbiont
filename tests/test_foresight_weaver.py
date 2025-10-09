@@ -13,6 +13,7 @@ from symbiont.llm.client import LLMClient
 from symbiont.memory.db import MemoryDB
 from symbiont.memory.dynamic_analyzer import BayesianTrendAnalyzer
 from symbiont.tools import research, systems_os
+from symbiont.agents.subself import SubSelf
 
 
 def test_foresight_weaver_creates_log(monkeypatch, tmp_path):
@@ -246,3 +247,34 @@ def test_bayesian_posterior_bounds(priors):
     assert ranked
     score = ranked[0]["score"]
     assert 0.0 <= score <= 1.0
+
+
+def test_peer_vote_consensus_marks_disputed(monkeypatch):
+    monkeypatch.setattr(
+        research,
+        "draft_proposal",
+        lambda llm, insight: {"proposal": "Async guard upgrade", "diff": "diff"},
+    )
+    role = {"name": "foresight_suggester"}
+    config = {
+        "foresight": {
+            "collaboration": {
+                "enabled": True,
+                "approve_threshold": 0.6,
+            }
+        }
+    }
+    suggester = SubSelf(role, config, llm_client=LLMClient({}))
+    context = {
+        "foresight_analysis": {"highlight": "Async resilience"},
+        "foresight_sources": {
+            "items": [
+                {"source": "peer", "peer": "grok", "peer_support": 0.82},
+                {"source": "peer", "peer": "devin", "peer_support": 0.3},
+            ]
+        },
+    }
+    result = suggester._foresight_suggester("Async resilience", context)
+    assert result["peer_consensus"]["vote"] == "approve"
+    assert result["status"] == "disputed"
+    assert len(result["peer_votes"]) == 2

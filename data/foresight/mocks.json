@@ -1,0 +1,46 @@
+{
+  "entries": [
+    {
+      "topic": "agentic trends",
+      "items": [
+        {
+          "title": "Offline: Scaling Async Agents",
+          "summary": "Survey of emergent multi-agent behaviors under async tooling.",
+          "source": "arxiv",
+          "url": "https://example.org/arxiv/async-agents",
+          "published": "2025-06-15",
+          "score": 1.42
+        },
+        {
+          "title": "Offline: Grok consensus on agent autonomy",
+          "summary": "Grok suggests probing antifragile governance patterns before rollout.",
+          "source": "peer",
+          "peer": "grok",
+          "peer_support": 0.82
+        },
+        {
+          "title": "Offline: Devin codebench diffs",
+          "summary": "Devin advocates async retry hooks plus pytest fuzz harness.",
+          "source": "peer",
+          "peer": "devin",
+          "peer_support": 0.48
+        }
+      ],
+      "meta": {
+        "source_breakdown": {
+          "arxiv": {
+            "count": 1,
+            "avg_score": 1.42
+          },
+          "peer": {
+            "count": 2,
+            "avg_score": 0.65
+          }
+        },
+        "total_candidates": 3,
+        "dropped_low_score": 0,
+        "deduped_triples": 3
+      }
+    }
+  ]
+}
