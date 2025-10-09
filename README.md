@@ -96,6 +96,7 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
 1) Install
 - Python 3.10+ and git installed.
 - `pip install -r requirements.txt`
+- Optional foresight extras: `pip install -r requirements-optional.txt`
 
 2) Homebase UI
 - Start: `streamlit run app.py`

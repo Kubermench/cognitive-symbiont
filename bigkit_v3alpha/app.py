@@ -170,6 +170,14 @@ with tab_governance:
 
 with tab_foresight:
     st.subheader("Foresight Hunts")
+    control_col, auto_col = st.columns([1, 1])
+    if control_col.button("Refresh metrics", key="foresight_refresh_button"):
+        st.experimental_rerun()
+    auto_refresh = auto_col.checkbox("Auto-refresh (15s)", key="foresight_auto_refresh")
+    if auto_refresh:
+        autorefresh_cb = getattr(st, "autorefresh", None)
+        if callable(autorefresh_cb):
+            autorefresh_cb(interval=15000, key="foresight_autorefresh_token")
     meta_dir = Path("data/artifacts/foresight/meta")
     records = []
     analyzer = ForesightAnalyzer()

@@ -1,0 +1,3 @@
+# Optional extras for foresight analytics
+pgmpy>=0.1.24
+dowhy>=0.11.1
