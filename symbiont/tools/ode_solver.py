@@ -40,6 +40,8 @@ def solve_sd_macro(config: MacroModelConfig) -> Dict[str, object]:
         horizon=config.horizon,
         noise=0.0,
         make_plot=True,
+        stability_tol=0.01,
+        min_steps=12,
     )
     equations = _derive_equations(config)
     payload: Dict[str, object] = {
@@ -93,4 +95,3 @@ def _derive_equations(config: MacroModelConfig) -> List[str]:
 
 
 __all__ = ["MacroModelConfig", "solve_sd_macro"]
-

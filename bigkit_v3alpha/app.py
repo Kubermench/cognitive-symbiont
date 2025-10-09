@@ -7,6 +7,7 @@ from symbiont.memory import graphrag
 from symbiont.orchestrator import Orchestrator
 from symbiont.initiative import daemon as initiative
 from symbiont import guards as guard_mod
+from symbiont.foresight import ForesightAnalyzer
 
 CFG_PATH = "./configs/config.yaml"
 st.set_page_config(page_title="Symbiont BigKit v3.0-alpha", layout="wide")
@@ -20,6 +21,26 @@ cfg = load_cfg()
 db = MemoryDB(db_path=cfg["db_path"]); db.ensure_schema()
 
 st.title("🧠 Symbiont BigKit v3.0-alpha")
+
+metrics_path = Path("data/artifacts/metrics/foresight_metrics.json")
+query_flags = st.experimental_get_query_params()
+if "metrics" in query_flags:
+    metric_rows = []
+    if metrics_path.exists():
+        try:
+            metric_rows = json.loads(metrics_path.read_text(encoding="utf-8"))
+        except Exception:
+            metric_rows = []
+    lines = [
+        "# HELP foresight_items_total Number of items gathered during foresight hunts",
+        "# TYPE foresight_items_total gauge",
+    ]
+    for row in metric_rows:
+        topic = row.get("topic", "foresight").replace('"', r"\"")
+        contributors = ",".join(row.get("contributors", []))
+        lines.append(f'foresight_items_total{{topic="{topic}",contributors="{contributors}"}} {row.get("items",0)}')
+    st.text("\n".join(lines) or "# no_metrics")
+    st.stop()
 
 tab_cycles, tab_memory, tab_beliefs, tab_governance, tab_foresight, tab_agency, tab_ports = st.tabs([
     "Cycles", "Memory", "Beliefs", "Governance", "Foresight", "Agency", "Ports"
@@ -151,6 +172,7 @@ with tab_foresight:
     st.subheader("Foresight Hunts")
     meta_dir = Path("data/artifacts/foresight/meta")
     records = []
+    analyzer = ForesightAnalyzer()
     if meta_dir.exists():
         for path in sorted(meta_dir.glob("*_meta.json")):
             try:
@@ -172,6 +194,8 @@ with tab_foresight:
                     "Sources": ", ".join(f"{src}:{info.get('count', 0)}" for src, info in breakdown.items()),
                     "Meta Path": str(path),
                     "Plot Path": meta.get("source_plot"),
+                    "Diff Path": meta.get("diff_path"),
+                    "Dataset Plot": meta.get("dataset_plot"),
                     "_breakdown": breakdown,
                     "_meta": meta,
                 }
@@ -188,6 +212,13 @@ with tab_foresight:
 
         latest = records[-1]
         latest_meta = latest.get("_meta", {})
+        metrics_history = []
+        if metrics_path.exists():
+            with open(metrics_path, "r", encoding="utf-8") as f:
+                metrics_history = json.loads(f.read() or "[]")
+        if metrics_history:
+            forecast = analyzer.forecast_trend(metrics_history)
+            st.caption(f"Trend forecast {forecast['prediction']:.2f} — {forecast['explanation']}")
         st.markdown("### Latest Hunt Metrics")
         metric_cols = st.columns(3)
         metric_cols[0].metric("Total Candidates", latest_meta.get("total_candidates", 0))
@@ -212,5 +243,20 @@ with tab_foresight:
         plot_path = latest.get("Plot Path")
         if plot_path and Path(plot_path).exists():
             st.image(str(plot_path), caption="Source distribution", use_column_width=True)
+        diff_path = latest.get("Diff Path")
+        if diff_path and Path(diff_path).exists():
+            st.code(Path(diff_path).read_text(encoding="utf-8")[:2000], language="json")
+        dataset_plot = latest.get("Dataset Plot")
+        if dataset_plot and Path(dataset_plot).exists():
+            st.image(str(dataset_plot), caption="Dataset summary", use_column_width=True)
+        state_path = Path("data/initiative/state.json")
+        if state_path.exists():
+            try:
+                state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+                reflection = state_payload.get("foresight_last_reflection")
+                if reflection:
+                    st.info(f"Next query suggestion: {reflection}")
+            except Exception:
+                pass
     else:
         st.info("No foresight hunts recorded yet.")

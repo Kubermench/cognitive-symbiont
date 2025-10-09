@@ -8,6 +8,7 @@ from ..llm.budget import TokenBudget
 from ..memory import retrieval
 import os, json, re
 from collections import Counter
+from ..foresight import ForesightAnalyzer, ForesightSuggester
 
 class SubSelf(BaseAgent):
     def __init__(
@@ -489,20 +490,37 @@ Only bullets. No extra text.
 
     def _foresight_analyzer(self, goal: str, context: Dict[str, Any]) -> Dict[str, Any]:
         sources = context.get("foresight_sources") or research.scout_insights(self.llm, goal)
+        try:
+            analyzer = ForesightAnalyzer()
+            weighted = analyzer.weight_sources(goal, sources.get("items", []))
+            sources_items = weighted.get("items", [])
+            sources_meta = dict(sources.get("meta") or {})
+            sources_meta.update(weighted.get("meta", {}))
+            sources = {**sources, "items": sources_items, "meta": sources_meta}
+            version_info = analyzer.version_triples(goal, sources_items)
+            context["foresight_triples"] = version_info.get("triples", [])
+            sources["meta"]["diff_path"] = version_info.get("diff_path")
+        except Exception:
+            context.setdefault("foresight_triples", [])
         analysis = research.analyze_insights(self.llm, sources.get("topic", goal), sources)
+        context["foresight_sources"] = sources
         context["foresight_analysis"] = analysis
         return {"role": self.name, **analysis}
 
     def _foresight_suggester(self, goal: str, context: Dict[str, Any]) -> Dict[str, Any]:
         analysis = context.get("foresight_analysis") or {"highlight": goal, "implication": "Investigate"}
-        proposal = research.draft_proposal(self.llm, analysis)
-        if not proposal.get("proposal") or not proposal.get("diff"):
-            topic = analysis.get("topic", goal) if isinstance(analysis, dict) else goal
-            proposal = research.build_fallback_proposal(topic, analysis if isinstance(analysis, dict) else None)
+        suggester = ForesightSuggester(self.llm)
+        sources = context.get("foresight_sources") or {}
+        triples = context.get("foresight_triples") or []
+        relevance = 0.0
+        if isinstance(sources, dict):
+            meta = sources.get("meta") or {}
+            relevance = float(meta.get("avg_score", 0.0))
+        context_block = {"triples": triples, "relevance": relevance, "query": goal}
+        proposal = suggester.draft(analysis if isinstance(analysis, dict) else {"highlight": str(analysis)}, context=context_block)
 
         foresight_cfg = (self.config.get("foresight") or {})
         collaboration_cfg = foresight_cfg.get("collaboration") or {}
-        sources = context.get("foresight_sources") or {}
         items = sources.get("items") if isinstance(sources, dict) else []
         peer_votes: List[Dict[str, Any]] = []
         approve_threshold = float(collaboration_cfg.get("approve_threshold", 0.5))
@@ -515,13 +533,7 @@ Only bullets. No extra text.
                 peer_name = str(entry.get("peer") or entry.get("source") or "peer")
                 support = float(entry.get("peer_support", 0.0))
                 vote_value = "approve" if support >= approve_threshold else "reject"
-                peer_votes.append(
-                    {
-                        "peer": peer_name,
-                        "vote": vote_value,
-                        "support": round(support, 3),
-                    }
-                )
+                peer_votes.append({"peer": peer_name, "vote": vote_value, "support": round(support, 3)})
 
         if peer_votes:
             vote_counts = Counter(vote["vote"] for vote in peer_votes)
@@ -534,7 +546,6 @@ Only bullets. No extra text.
                 "confidence": round(consensus_ratio, 3),
                 "total": total_votes,
             }
-            proposal.setdefault("status", "consensus" if consensus_ratio >= 0.6 else "disputed")
             if consensus_ratio < 0.6:
                 proposal["status"] = "disputed"
             elif top_vote != "approve":
@@ -544,7 +555,7 @@ Only bullets. No extra text.
 
     def _foresight_validator(self, goal: str, context: Dict[str, Any]) -> Dict[str, Any]:
         proposal = context.get("foresight_proposal") or {"proposal": goal, "diff": "# noop"}
-        validation = research.validate_proposal(self.llm, proposal)
+        validation = ForesightSuggester(self.llm).validate(proposal)
         if not validation.get("tests"):
             validation = research.build_fallback_validation(proposal)
         context["foresight_validation"] = validation

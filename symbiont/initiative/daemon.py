@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import os, time, json, subprocess
 from pathlib import Path
 from typing import Dict, Any, Tuple, List, Optional
@@ -20,6 +21,7 @@ from ..llm.client import LLMClient
 from ..memory.db import MemoryDB
 from ..tools.files import ensure_dirs
 from ..tools.research import call_peer_collaborators
+from symbiont.foresight import HuntConfig, ForesightAnalyzer, run_hunt_async
 from .watchers import RepoWatchConfig, build_repo_watch_configs
 from .pubsub import get_client
 from .state import get_state_store, resolve_node_id
@@ -297,12 +299,51 @@ def _run_foresight(
     )
     crews_file = Path(crew_config_path).expanduser().resolve()
 
+    hunt_payload: Dict[str, Any] = {}
+    hunt_artifact: Optional[Path] = None
+    try:
+        llm = LLMClient(cfg.get("foresight", {}).get("llm_override") or cfg.get("llm", {}))
+        hunt_cfg = HuntConfig(
+            offline=bool(foresight_cfg.get("offline_mode", False)),
+            include_collaborators=model.collaboration.enabled,
+            include_rss=foresight_cfg.get("include_rss", True),
+            credential_spec=foresight_cfg.get("credential"),
+            max_items=int(foresight_cfg.get("max_items", 6) or 6),
+        )
+        hunt_payload, hunt_artifact = asyncio.run(
+            run_hunt_async(llm, goal, config=hunt_cfg)
+        )
+    except Exception as exc:  # pragma: no cover - network specific
+        logger.warning("Foresight async hunt failed, continuing with crew run: %s", exc)
+        hunt_payload = {}
+        hunt_artifact = None
+
     try:
         registry = AgentRegistry.from_yaml(crews_file)
         db = MemoryDB(cfg["db_path"])
         runner = CrewRunner(registry, cfg, db)
         artifact_path = runner.run(crew_name, goal)
         run_context = getattr(runner, "last_context", {})
+
+        if hunt_payload:
+            analyzer = ForesightAnalyzer(db)
+            weighted = analyzer.weight_sources(goal, hunt_payload.get("items", []))
+            hunt_payload["items"] = weighted.get("items", [])
+            meta = dict(hunt_payload.get("meta") or {})
+            meta.update(weighted.get("meta", {}))
+            hunt_payload["meta"] = meta
+            try:
+                version_info = analyzer.version_triples(goal, hunt_payload["items"])
+                analyzer.upsert_triples(goal, version_info.get("triples", []))
+                hunt_payload["meta"]["diff_path"] = version_info.get("diff_path")
+            except Exception as exc:  # pragma: no cover - file/db issues
+                logger.debug("Foresight triple versioning failed: %s", exc)
+            reflection = analyzer.reflect_hunt(
+                goal,
+                float(hunt_payload["meta"].get("avg_score", 0.0)),
+            )
+            state["foresight_last_reflection"] = reflection
+            run_context.setdefault("foresight_sources", hunt_payload)
     except Exception as exc:
         _publish_event(
             cfg,
@@ -319,6 +360,8 @@ def _run_foresight(
     state["foresight_last_run_ts"] = now
     state["foresight_last_goal"] = goal
     state["foresight_last_artifact"] = str(artifact_path)
+    if hunt_artifact:
+        state["foresight_last_hunt_artifact"] = str(hunt_artifact)
     state["last_proposal_ts"] = now
 
     relevance_score = 0.0

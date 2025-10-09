@@ -28,6 +28,11 @@ from ..tools import scriptify, sd_engine
 from .schema import GraphFileModel
 from .systems import governance_snapshot
 
+try:  # Optional LangGraph dependency
+    from langgraph.graph import StateGraph  # type: ignore
+except Exception:  # pragma: no cover - optional
+    StateGraph = None  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 
@@ -101,6 +106,21 @@ class GraphSpec:
             parallel_groups=parallel_groups,
         )
 
+    def langgraph_blueprint(self) -> Dict[str, Any]:
+        """Return a lightweight structure consumable by LangGraph."""
+        edges: list[tuple[str, str]] = []
+        for node in self.nodes.values():
+            if node.next:
+                edges.append((node.name, node.next))
+            for branch in (node.on_success, node.on_failure, node.on_block):
+                if branch:
+                    edges.append((node.name, branch))
+        return {
+            "start": self.start,
+            "nodes": {name: node.agent for name, node in self.nodes.items()},
+            "edges": edges,
+        }
+
 
 class GraphRunner:
     def __init__(
@@ -134,6 +154,19 @@ class GraphRunner:
         }
         self.current_handoff: Optional[Dict[str, Any]] = None
         self.token_budget: Optional[TokenBudget] = None
+
+    def compile_langgraph(self):
+        """Compile the current graph into a LangGraph StateGraph if available."""
+        if not StateGraph:  # pragma: no cover - optional dependency
+            raise RuntimeError("langgraph is not installed; run `pip install langgraph` to enable interop.")
+        blueprint = self.spec.langgraph_blueprint()
+        graph = StateGraph(dict)
+        for node_name, agent_name in blueprint["nodes"].items():
+            graph.add_node(node_name, lambda state, agent=agent_name: state | {"last_agent": agent})
+        for src, dst in blueprint["edges"]:
+            graph.add_edge(src, dst)
+        graph.set_entry_point(blueprint["start"])
+        return graph.compile()
 
     def run(self, goal: str, resume_state: Optional[Path] = None) -> Path | Dict[str, Any]:
         limit = 0

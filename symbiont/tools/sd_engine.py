@@ -162,6 +162,8 @@ def simulate(
     noise: float = 0.0,
     artifacts_dir: Path | str = Path("data/artifacts/plots"),
     make_plot: bool = True,
+    stability_tol: float = 0.01,
+    min_steps: int = 12,
 ) -> Dict[str, object]:
     """Run the simulation described by ``spec`` and capture artifacts."""
 
@@ -172,6 +174,7 @@ def simulate(
     stock_bounds = {stock.name: (stock.min_value, stock.max_value) for stock in spec.stocks}
     timeline: List[Dict[str, float]] = [{"time": 0.0, **state}]
 
+    stable_streak = 0
     for step in range(1, horizon + 1):
         aux_values = {
             aux.name: _evaluate_expression(aux.expression, state=state, aux={}, params=spec.parameters)
@@ -183,6 +186,7 @@ def simulate(
             value = _evaluate_expression(flow.expression, state=state, aux=aux_values, params=spec.parameters)
             delta[flow.target] = delta.get(flow.target, 0.0) + flow.weight * value
 
+        deltas_for_stability: Dict[str, float] = {}
         for stock in spec.stocks:
             change = delta.get(stock.name, 0.0) * spec.timestep
             if noise:
@@ -193,8 +197,16 @@ def simulate(
                 new_value = max(minimum, new_value)
             if maximum is not None:
                 new_value = min(maximum, new_value)
+            deltas_for_stability[stock.name] = abs(new_value - state[stock.name])
             state[stock.name] = new_value
         timeline.append({"time": float(step * spec.timestep), **state})
+
+        if all(delta <= stability_tol for delta in deltas_for_stability.values()):
+            stable_streak += 1
+            if step >= min_steps and stable_streak >= 3:
+                break
+        else:
+            stable_streak = 0
 
     stats = _summarise(spec.stocks, timeline)
     plot_path: Optional[str] = None
@@ -207,6 +219,7 @@ def simulate(
         "plot_path": plot_path,
         "timestep": spec.timestep,
         "parameters": spec.parameters,
+        "steps": len(timeline) - 1,
     }
 
 
@@ -260,4 +273,3 @@ def _coerce_optional(value: object) -> Optional[float]:
 
 
 __all__ = [name for name in globals() if name[0].isupper() or name in {"build_spec", "simulate"}]
-

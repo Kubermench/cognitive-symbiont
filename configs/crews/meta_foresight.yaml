@@ -1,0 +1,26 @@
+agents:
+  meta_reflector_agent:
+    role: foresight_analyzer
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  meta_suggestor_agent:
+    role: foresight_suggester
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+
+crew:
+  meta_foresight:
+    description: Reflect on recent foresight hunts and suggest query adjustments.
+    sequence:
+      - meta_reflector_agent
+      - meta_suggestor_agent

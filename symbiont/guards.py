@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from symbiont.llm.client import LLMClient
 from symbiont.llm.budget import TokenBudget
 from symbiont.tools import systems_os
+from symbiont.tools.zk_prover import prove_diff, verify_diff
 
 RISK_PATTERNS = [
     (re.compile(r"rm\s+-rf\s+/"), 0.8, "Deletes root directory"),
@@ -268,17 +269,13 @@ def build_safety_proof(script_path: Path) -> Dict[str, Any]:
 
 
 def generate_zk_stub(proof: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "statement": "Script hash attested without exposing contents",
-        "timestamp": int(time.time()),
-        "hash": proof.get("hash"),
-        "merkle_root": proof.get("merkle_root"),
-    }
+    payload = json.dumps(proof, sort_keys=True)
+    return prove_diff(payload)
 
 
 def verify_zk_stub(proof: Dict[str, Any], script_path: Path) -> bool:
-    expected = build_safety_proof(script_path)
-    return bool(proof) and proof.get("hash") == expected.get("hash")
+    payload = json.dumps(build_safety_proof(script_path), sort_keys=True)
+    return verify_diff(proof, payload)
 
 
 def preflight_diff_guard(diff_text: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
