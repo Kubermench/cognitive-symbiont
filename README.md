@@ -10,7 +10,8 @@ This bundle includes RAG memory, a local-first LLM adapter, a Streamlit homebase
 - Proposals: generates a one-step plan and a non-executing apply script plus a rollback script (one per repo configured).
 
 ### Quick Start (non-technical friendly)
-1. Open a terminal in the project folder and run `streamlit run app.py`.
+1. (Optional) install the CLI locally: `pip install .` then run commands via the new `sym` entry point.
+2. Open a terminal in the project folder and run `streamlit run app.py`.
 2. In the web app, click **Run a cycle**. Symbiont will write a short plan on the left and a matching script on the right.
 3. Read the plan. If it sounds good, press **Run safely (guarded)** → **Confirm**. Symbiont runs the script, saves the log, and shows a success message.
 4. Need a web reference? Use **Settings → Browser → Fetch to notes** and confirm; the note appears in “Sources” for the next plan.
@@ -45,7 +46,12 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
 - Reflection + mutation: each cycle feeds `data/evolution/state.json`; `sym evolve_self --scope planner` queues guarded prompt tweaks (≤5% diff) saved under `data/artifacts/mutations/` after triple sandbox validation.
 - Swarm evolution: enable `evolution.swarm_enabled=true` to spawn parallel belief variants, score via peer chats, and merge consensus claims (`sym swarm_evolve "belief: UI->prefers->dark_mode"`).
 - Rollback sandbox: `python -m symbiont.cli rollback-test data/artifacts/scripts/apply_*.sh` runs apply→rollback→apply in a temp checkout to guarantee idempotence before human approval.
+- External RAG bridge: `python -m symbiont.cli rag-fetch-external "agentic AI"` hits arXiv + Semantic Scholar, caches under `data/external/`, and merges high-confidence triples into GraphRAG before the next cycle. Flip `retrieval.external.enabled` to `true` in `configs/config.yaml` to make this automatic for every orchestration cycle or graph run, and use `python -m symbiont.cli rag-cache` to inspect/clear cached fetches.
+- Reflector meta-learning: cycle rewards quietly tune the planner repeat/empty thresholds so evolution triggers sooner when diversity or bullet quality dips.
+- Evolution status: `python -m symbiont.cli evolution-status -n 3` prints live meta adjustments and the last few cycle outcomes, pulling from `data/evolution/state.json`.
+- Watcher config: `python -m symbiont.cli watchers-config` shows the normalized repo watcher settings, including idle timers, trigger mode, and rollback verification.
 - Diff preview: `python -m symbiont.cli script_diff data/artifacts/scripts/apply_*.sh` renders a git diff without touching the working tree; the VS Code command “Symbiont: Show Proposal Diff” mirrors the output in a webview.
+- Rollbacks require an explicit `SYM_ROLLBACK_FORCE=1` environment variable to run destructive git resets; without it the guard refuses to proceed.
 - Intent checkpoint: save an "intent summary" (Settings) to align future proposals.
 - Browser (read-only): allowlisted fetches into `data/artifacts/notes/` with source URLs; `tools.network_access` must be true.
 - GraphRAG-lite: add/query simple claims, resolve conflicts with confidence voting, and visualise triples in BigKit.
@@ -54,6 +60,7 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
 - AI peer bridge: `sym peer_chat --prompt "Summarise migration risks"` simulates external conversations (stubbed unless configured).
 - GitHub guard: `sym github_pr --title "Symbiont autopilot" --dry-run false` opens PRs under allowlisted owners using PyGitHub and stored tokens.
 - **Observability metrics**: `sym metrics --port 8001` exposes Prometheus gauges for token usage, latency, and rogue scores; the Streamlit dashboard charts cumulative budgets and warns when limits are near.
+- **Shadow observability**: `sym shadow_report`, `sym shadow_label --ingest`, `sym shadow_batch`, and `sym shadow_dashboard` capture guard/cycle clips into labeled datasets, append JSONL history under `data/artifacts/shadow/history.jsonl`, and generate governance dashboards (`systems/ShadowDashboard.md`, optional `systems/ShadowHistory.md`). Use `sym shadow_history --limit 5 --output systems/ShadowHistory.md` to review and export aggregated label trends.
 - **Security helpers**: `sym rotate_credential ENV_KEY NEW_VALUE --env-file .env` rotates credentials with `audit_logs` tracking, and transcripts/notes now auto-redact emails, phone numbers, and obvious secrets.
 - **Graph & crew templates**: reusable starters live under `configs/templates/graph_template.yaml` and `configs/templates/crew_template.yaml`, validated via new Pydantic schemas.
 - MCP server (minimal) + CLI `install-hooks` for RAG automation.

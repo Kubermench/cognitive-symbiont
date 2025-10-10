@@ -24,6 +24,7 @@ from ..agents.registry import AgentRegistry
 from ..agents.subself import SubSelf
 from ..llm.budget import TokenBudget
 from ..memory.db import MemoryDB
+from ..memory import retrieval
 from ..tools import scriptify, sd_engine
 from .schema import GraphFileModel
 from .systems import governance_snapshot
@@ -226,6 +227,9 @@ class GraphRunner:
             "token_budget": self.token_budget,
         }
         self.db.ensure_schema()
+        external_context = self._maybe_fetch_external(goal)
+        if external_context:
+            context["external_context"] = external_context
         latest_bullets: Iterable[str] = []
         pause_between = bool((self.cfg.get("ui") or {}).get("pause_between_nodes", False))
 
@@ -541,6 +545,36 @@ class GraphRunner:
             "auxiliaries": [],
             "parameters": {},
         }
+
+    def _maybe_fetch_external(self, goal: str) -> Dict[str, Any]:
+        ext_cfg = (self.cfg.get("retrieval") or {}).get("external") or {}
+        if not ext_cfg.get("enabled"):
+            return {}
+        max_items = int(ext_cfg.get("max_items", 6))
+        min_relevance = float(ext_cfg.get("min_relevance", 0.7))
+        log_enabled = bool(ext_cfg.get("log", True))
+        try:
+            result = retrieval.fetch_external_context(
+                self.db,
+                goal,
+                max_items=max_items,
+                min_relevance=min_relevance,
+            )
+        except Exception as exc:
+            if log_enabled:
+                logger.warning("Graph external fetch skipped: %s", exc)
+            return {}
+        if log_enabled:
+            accepted = len(result.get("accepted") or [])
+            claims = len(result.get("claims") or [])
+            logger.info(
+                "Graph external context fetched: goal=%s accepted=%d claims=%d min_relevance=%.2f",
+                goal,
+                accepted,
+                claims,
+                min_relevance,
+            )
+        return result
 
     def _save_state(
         self,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os, json, re, time
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from rich import print as rprint
 from .memory.db import MemoryDB
 from .memory import retrieval
@@ -13,6 +13,7 @@ from .agents.swarm import SwarmCoordinator
 from .tools.files import ensure_dirs
 from .memory import beliefs as belief_api
 from .tools import scriptify
+from .observability.shadow import ShadowClipCollector
 
 class Orchestrator:
     def __init__(self, config: Dict[str, Any]):
@@ -24,23 +25,32 @@ class Orchestrator:
         self.reflector = CycleReflector(config)
         swarm_candidate = SwarmCoordinator(config)
         self.swarm = swarm_candidate if swarm_candidate.enabled else None
+        self._data_root = Path(
+            self.config.get("data_root")
+            or Path(self.config.get("db_path", "./data/symbiont.db")).parent
+        )
+        shadow_dir = self._data_root / "artifacts" / "shadow"
+        try:
+            self._shadow_collector: Optional[ShadowClipCollector] = ShadowClipCollector(shadow_dir)
+        except Exception:
+            self._shadow_collector = None
         self._rlhf_dir = Path(self.db.db_path).parent / "artifacts" / "rlhf"
         self._rlhf_dir.mkdir(parents=True, exist_ok=True)
 
     def cycle(self, goal: str) -> Dict[str, Any]:
         self.db.ensure_schema()
         retrieval.build_indices(self.db, limit_if_new=256)
+        external_context = self._maybe_fetch_external(goal)
         eid = self.db.start_episode(title=f"Goal: {goal}")
         ctx = {"goal": goal, "episode_id": eid, "cwd": os.getcwd()}
+        if external_context:
+            ctx["external_context"] = external_context
         limit = 0
         try:
             limit = int(self.config.get("max_tokens", 0) or 0)
         except (TypeError, ValueError):
             limit = 0
-        data_root = Path(
-            self.config.get("data_root")
-            or Path(self.config.get("db_path", "./data/symbiont.db")).parent
-        )
+        data_root = self._data_root
         sink_path = data_root / "token_budget" / f"cycle_{eid}.json"
         history_path = sink_path.parent / "history.jsonl"
         budget = TokenBudget(
@@ -81,6 +91,7 @@ class Orchestrator:
                 rprint(f"[yellow]Swarm evolution skipped:[/yellow] {exc}")
         rprint("[bold green]Consensus Action:[/bold green]", decision["action"], "\n[dim]Saved:", plan)
         self._log_cycle_reward(eid, goal, reward, trace)
+        self._shadow_cycle(goal, decision, trace, reward=reward, episode_id=eid)
         return result
 
     def _consensus(self, trace: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -189,6 +200,64 @@ class Orchestrator:
         path = self._rlhf_dir / f"reward_{episode_id}.json"
         try:
             path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _maybe_fetch_external(self, goal: str) -> Dict[str, Any]:
+        ext_cfg = (self.config.get("retrieval") or {}).get("external") or {}
+        if not ext_cfg or not ext_cfg.get("enabled"):
+            return {}
+        max_items = int(ext_cfg.get("max_items", 6))
+        min_relevance = float(ext_cfg.get("min_relevance", 0.7))
+        log_enabled = bool(ext_cfg.get("log", True))
+        try:
+            result = retrieval.fetch_external_context(
+                self.db,
+                goal,
+                max_items=max_items,
+                min_relevance=min_relevance,
+            )
+        except Exception as exc:
+            if log_enabled:
+                rprint(f"[yellow]External fetch skipped:[/yellow] {exc}")
+            return {}
+        if log_enabled:
+            accepted = len(result.get("accepted") or [])
+            claims = len(result.get("claims") or [])
+            rprint(
+                f"[green]External context:[/green] {accepted} item(s), {claims} claim(s) merged "
+                f"(min_relevance={min_relevance})"
+            )
+        return result
+
+    def _shadow_cycle(
+        self,
+        goal: str,
+        decision: Dict[str, Any],
+        trace: List[Dict[str, Any]],
+        *,
+        reward: Optional[float],
+        episode_id: int,
+    ) -> None:
+        if not self._shadow_collector:
+            return
+        tags = []
+        env = self.config.get("env")
+        if env:
+            tags.append(f"env:{env}")
+        autonomy = (self.config.get("initiative") or {}).get("autonomy_mode")
+        if autonomy:
+            tags.append(f"autonomy:{autonomy}")
+        tags.append("orchestrator")
+        try:
+            self._shadow_collector.record_cycle(
+                goal,
+                decision,
+                trace,
+                reward=reward,
+                tags=tags,
+                meta={"episode_id": episode_id, "source": "orchestrator"},
+            )
         except Exception:
             pass
 

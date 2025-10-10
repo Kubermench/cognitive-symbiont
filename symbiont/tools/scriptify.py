@@ -63,6 +63,7 @@ def write_script(bullets, base_dir: str, db_path: Optional[str] = None, episode_
         "",
         "# Safety: consider stashing before applying changes:",
         "#   git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git stash push -u -k -m pre-symbiont-$(date +%s) || true",
+        "#   Rollbacks require SYM_ROLLBACK_FORCE=1 before destructive git resets will proceed.",
         "",
     ]
     # annotate sources from recent notes
@@ -108,6 +109,10 @@ def write_rollback_script(apply_path: str) -> str:
         "  echo '[rollback] Using git to restore working tree...'",
         "  # Prefer popping last stash created by apply script; otherwise hard reset uncommitted changes.",
         "  git stash list | grep pre-symbiont- >/dev/null 2>&1 && git stash pop || true",
+        "  if [ \"${SYM_ROLLBACK_FORCE:-0}\" != \"1\" ]; then",
+        "    echo '[rollback] Refusing destructive reset. Set SYM_ROLLBACK_FORCE=1 to continue.'",
+        "    exit 1",
+        "  fi",
         "  git reset --hard HEAD || true",
         "  git clean -fd || true",
         "else",

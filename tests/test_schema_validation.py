@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
 
 from symbiont.orchestration.graph import GraphSpec
 from symbiont.agents.registry import AgentRegistry
+from symbiont.memory import db as memory_db
 
 
 def test_graph_validation_requires_agent(tmp_path):
@@ -43,3 +44,24 @@ crew:
     )
     with pytest.raises(ValidationError):
         AgentRegistry.from_yaml(crew_yaml)
+
+
+def test_memory_db_records_schema_version(tmp_path):
+    path = tmp_path / "sym.db"
+    database = memory_db.MemoryDB(str(path))
+    database.ensure_schema()
+    assert database.schema_version() == memory_db.SCHEMA_VERSION
+
+
+def test_memory_db_rejects_newer_schema(tmp_path):
+    path = tmp_path / "sym.db"
+    database = memory_db.MemoryDB(str(path))
+    database.ensure_schema()
+    with database._conn() as conn:  # noqa: SLF001 - internal use for test
+        conn.execute(
+            "INSERT INTO schema_meta (key, value) VALUES ('version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(memory_db.SCHEMA_VERSION + 10),),
+        )
+    with pytest.raises(RuntimeError):
+        database.ensure_schema()

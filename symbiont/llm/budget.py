@@ -14,6 +14,8 @@ def _estimate_tokens(text: str) -> int:
         return 0
     return max(1, len(text) // 4)
 
+_MAX_IN_MEMORY_EVENTS = 200
+_SNAPSHOT_THROTTLE_SECONDS = 0.5
 
 @dataclass
 class TokenBudget:
@@ -26,6 +28,7 @@ class TokenBudget:
     sink_path: Optional[Path] = None
     history_path: Optional[Path] = None
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _last_snapshot_monotonic: float = field(default=float("-inf"), init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.sink_path and not self.history_path:
@@ -75,6 +78,8 @@ class TokenBudget:
             event["error"] = error
         with self._lock:
             self.events.append(event)
+            if len(self.events) > _MAX_IN_MEMORY_EVENTS:
+                self.events = self.events[-_MAX_IN_MEMORY_EVENTS:]
             self._write_snapshot()
             self._append_history(event)
 
@@ -113,9 +118,13 @@ class TokenBudget:
     def _write_snapshot(self) -> None:
         if not self.sink_path:
             return
+        now = time.monotonic()
+        if (now - self._last_snapshot_monotonic) < _SNAPSHOT_THROTTLE_SECONDS:
+            return
         try:
             self.sink_path.parent.mkdir(parents=True, exist_ok=True)
             self.sink_path.write_text(json.dumps(self.snapshot(), indent=2), encoding="utf-8")
+            self._last_snapshot_monotonic = now
         except Exception:
             pass
 

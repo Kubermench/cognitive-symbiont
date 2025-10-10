@@ -1,0 +1,96 @@
+{
+  "query": "Self-research agenda",
+  "max_items": 6,
+  "items": [
+    {
+      "source": "arxiv",
+      "title": "Measuring the Volatility of the Political agenda in Public Opinion and News Media",
+      "url": "http://arxiv.org/abs/1808.09037v2",
+      "summary": "Recent election surprises, regime changes, and political shocks indicate that political agendas have become more fast-moving and volatile. The ability to measure the complex dynamics of agenda change and capture the nature and extent of volatility in political systems is therefore more crucial than ever before. This study proposes a definition and operationalization of volatility that combines insights from political science, communications, information theory, and computational techniques. The proposed measures of fractionalization and agenda change encompass the shifting salience of issues in the agenda as a whole and allow the study of agendas across different domains. We evaluate these metrics and compare them to other measures such as issue-level survival rates and the Pedersen Index, which uses public-opinion poll data to measure public agendas, as well as traditional media content to measure media agendas in the UK and Germany. We show how these measures complement existing approaches and could be employed in future agenda-setting research.",
+      "relevance": 0.7667,
+      "metadata": {
+        "published": "2018-08-27T21:28:46Z",
+        "authors": [
+          "Chico Q. Camargo",
+          "Scott A. Hale",
+          "Peter John",
+          "Helen Z. Margetts"
+        ]
+      }
+    },
+    {
+      "source": "arxiv",
+      "title": "Aggregating Credences into Beliefs: Agenda Conditions for Impossibility Results",
+      "url": "http://arxiv.org/abs/2307.05072v1",
+      "summary": "Binarizing belief aggregation addresses how to rationally aggregate individual probabilistic beliefs into collective binary beliefs. Similar to the development of judgment aggregation theory, formulating axiomatic requirements, proving impossibility theorems, and identifying exact agenda conditions of impossibility theorems are natural and important research topics in binarizing belief aggregation. Building on our previous research on impossibility theorems, we use an agenda-theoretic approach to generalize the results and to determine the necessary and sufficient level of logical interconnection between the issues in an agenda for the impossibility theorems to arise. We demonstrate that (1) path-connectedness and even-negatability constitute the exact agenda condition for the oligarchy result stating that binarizing belief aggregation satisfying proposition-wise independence and deductive closure of collective beliefs yields the oligarchies under minor conditions; (2) negation-connectedness is the condition for the triviality result obtained by adding anonymity to the oligarchy result; and (3) blockedness is the condition for the impossibility result, which follows by adding completeness and consistency of collective beliefs. Moreover, we compare these novel findings with existing agenda-theoretic characterization theorems in judgment aggregation and belief binarization.",
+      "relevance": 0.7667,
+      "metadata": {
+        "published": "2023-07-11T07:15:11Z",
+        "authors": [
+          "Minkyung Wang",
+          "Chisu Kim"
+        ]
+      }
+    },
+    {
+      "source": "arxiv",
+      "title": "Quantifying time-dependent Media Agenda and Public Opinion by topic modeling",
+      "url": "http://arxiv.org/abs/1807.05184v3",
+      "summary": "The mass media plays a fundamental role in the formation of public opinion, either by defining the topics of discussion or by making an emphasis on certain issues. Directly or indirectly, people get informed by consuming news from the media. Naturally, two questions appear: What are the dynamics of the agenda and how the people become interested in their different topics? These questions cannot be answered without proper quantitative measures of agenda dynamics and public attention. In this work we study the agenda of newspapers in comparison with public interests by performing topic detection over the news. We define Media Agenda as the distribution of topic's coverage by the newspapers and Public Agenda as the distribution of public interest in the same topic space. We measure agenda diversity as a function of time using the Shannon entropy and differences between agendas using the Jensen-Shannon distance. We found that the Public Agenda is less diverse than the Media Agenda, especially when there is a very attractive topic and the audience naturally focuses only on this one. Using the same methodology we detect coverage bias in newspapers. Finally, it was possible to identify a complex agenda-setting dynamics within a given topic where the least sold newspaper triggered a public debate via a positive feedback mechanism with social networks discussions which install the issue in the Media Agenda.",
+      "relevance": 0.4333,
+      "metadata": {
+        "published": "2018-07-13T17:13:19Z",
+        "authors": [
+          "Sebasti\u00e1n Pinto",
+          "Federico Albanese",
+          "Claudio O. Dorso",
+          "Pablo Balenzuela"
+        ]
+      }
+    },
+    {
+      "source": "arxiv",
+      "title": "Who Controls the Agenda Controls the Polity",
+      "url": "http://arxiv.org/abs/2212.01263v1",
+      "summary": "This paper models legislative decision-making with an agenda setter who can propose policies sequentially, tailoring each proposal to the status quo that prevails after prior votes. Voters are sophisticated and the agenda setter cannot commit to her future proposals. Nevertheless, the agenda setter obtains her favorite outcome in every equilibrium regardless of the initial default policy. Central to our results is a new condition on preferences, manipulability, that holds in rich policy spaces, including spatial settings and distribution problems. Our results overturn the conventional wisdom that voter sophistication alone constrains an agenda setter's power.",
+      "relevance": 0.4333,
+      "metadata": {
+        "published": "2022-12-02T16:00:16Z",
+        "authors": [
+          "S. Nageeb Ali",
+          "B. Douglas Bernheim",
+          "Alexander W. Bloedel",
+          "Silvia Console Battilana"
+        ]
+      }
+    },
+    {
+      "source": "arxiv",
+      "title": "Agenda Separability in Judgment Aggregation",
+      "url": "http://arxiv.org/abs/1604.06614v1",
+      "summary": "One of the better studied properties for operators in judgment aggregation is independence, which essentially dictates that the collective judgment on one issue should not depend on the individual judgments given on some other issue(s) in the same agenda. Independence, although considered a desirable property, is too strong, because together with mild additional conditions it implies dictatorship. We propose here a weakening of independence, named agenda separability: a judgment aggregation rule satisfies it if, whenever the agenda is composed of several independent sub-agendas, the resulting collective judgment sets can be computed separately for each sub-agenda and then put together. We show that this property is discriminant, in the sense that among judgment aggregation rules so far studied in the literature, some satisfy it and some do not. We briefly discuss the implications of agenda separability on the computation of judgment aggregation rules.",
+      "relevance": 0.4333,
+      "metadata": {
+        "published": "2016-04-22T11:53:37Z",
+        "authors": [
+          "J\u00e9r\u00f4me Lang",
+          "Marija Slavkovik",
+          "Srdjan Vesic"
+        ]
+      }
+    },
+    {
+      "source": "arxiv",
+      "title": "Monopoly agenda control with privately informed voters",
+      "url": "http://arxiv.org/abs/2402.06495v1",
+      "summary": "An agenda-setter repeatedly proposes a spatial policy to voters until some proposal is accepted. Voters have distinct but correlated preferences and receive private signals about the common state. I investigate whether the agenda-setter retains the power to screen voters as players become perfectly patient and private signals become perfectly precise. I show that the extent of this power depends on the relative precision of private signals and the conflict of preferences among voters, confirming the crucial role of committee setting and single-peaked preferences. When the private signals have equal precision, the agenda-setter can achieve the full-information benchmark. When one voter receives an asymptotically more precise signal, the agenda-setter's power to screen depends on preference diversity. These results imply that the lack of commitment to a single proposal can benefit the agenda-setter. Surprisingly, an increase in the voting threshold can allow the agenda-setter to extract more surplus.",
+      "relevance": 0.4333,
+      "metadata": {
+        "published": "2024-02-09T16:01:24Z",
+        "authors": [
+          "Kirill S. Evdokimov"
+        ]
+      }
+    }
+  ]
+}

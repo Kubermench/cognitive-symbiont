@@ -5,6 +5,7 @@ import os
 import subprocess
 import time
 from typing import Dict, Optional
+import shlex
 
 from tenacity import (
     RetryCallState,
@@ -265,10 +266,16 @@ class LLMClient:
         if not cmd:
             return ""
         try:
-            rendered = cmd.replace("{prompt}", prompt.replace('"', '\\"'))
+            parts = shlex.split(cmd)
+        except ValueError as exc:
+            logger.debug("cmd provider parse failed: %s", exc)
+            return ""
+        substituted: list[str] = []
+        for part in parts:
+            substituted.append(part.replace("{prompt}", prompt))
+        try:
             out = subprocess.run(
-                rendered,
-                shell=True,
+                substituted,
                 capture_output=True,
                 text=True,
                 timeout=timeout,

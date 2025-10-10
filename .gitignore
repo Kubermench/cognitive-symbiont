@@ -5,6 +5,9 @@ __pycache__/
 # Generated artifacts
 data/artifacts/
 data/evolution/
+data/initiative/
+data/token_budget/
+data/*.db
 sandbox/sandbox/.state/
 sandbox/.pytest_cache/
 .coverage

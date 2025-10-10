@@ -1,11 +1,13 @@
 import os, json, typer, yaml, sqlite3, time, stat
+from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, List
 from rich import print as rprint
 from .orchestrator import Orchestrator
 from .memory.db import MemoryDB
 from .memory import retrieval
+from .memory.external_sources import list_cache_entries, clear_cache
 from .tools import repo_scan, scriptify
 from .llm.client import LLMClient
 from .llm.budget import TokenBudget
@@ -22,15 +24,78 @@ from .ports.github import GitHubGuard
 from .observability.metrics import serve_metrics as start_metrics_server
 from .tools.security import rotate_env_secret
 from .tools.systems_os import update_flow_metrics
-from .initiative.watchers import WatchEvent  # noqa: F401 (placeholder for future use)
+from .initiative.watchers import WatchEvent, build_repo_watch_configs  # noqa: F401 (placeholder for future use)
 from .runtime.guard import Guard, Action, Capability  # noqa: F401 (placeholder for future use)
 from .ports import browser as browser_port
 from .memory import graphrag
+from .observability.shadow_curator import ShadowCurator
+from .observability.shadow_labeler import annotate_summary
+from .observability.shadow_ingest import (
+    latest_labeled_path,
+    load_labeled_summary,
+    ingest_labels,
+    summarize_labels,
+)
+from .observability.shadow_dashboard import render_dashboard
+from .observability.shadow_history import record_history, load_history
 
 app = typer.Typer(help="Cognitive Symbiont — MVP CLI v2.3")
 
 def load_config(path: str = "./configs/config.yaml"):
     with open(path,"r",encoding="utf-8") as f: return yaml.safe_load(f)
+
+def _label_shadow(
+    cfg: Dict[str, Any],
+    *,
+    guard_threshold: float,
+    reward_threshold: float,
+    limit: int,
+    output: Optional[str],
+) -> tuple[Dict[str, Any], Dict[str, Any], Path, int, int, int, Path]:
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    clip_dir = data_root / "artifacts" / "shadow"
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    clip_path = clip_dir / "shadow_clips.jsonl"
+    curator = ShadowCurator(clip_path)
+    summary = curator.curate(
+        guard_threshold=guard_threshold,
+        guard_limit=limit,
+        reward_threshold=reward_threshold,
+        cycle_limit=limit,
+        limit=limit,
+    )
+    labeled = annotate_summary(summary)
+    guard_total = len(summary.get("guards", {}).get("high", [])) + len(summary.get("guards", {}).get("medium", []))
+    cycle_total = len(summary.get("cycles", {}).get("low_reward", []))
+    meta = summary.get("meta") or {}
+    counts = meta.get("counts") or {}
+    total = counts.get("total", 0)
+
+    if output:
+        out_path = Path(output).expanduser().resolve()
+    else:
+        label_dir = clip_dir / "labels"
+        label_dir.mkdir(parents=True, exist_ok=True)
+        out_path = label_dir / f"shadow_labels_{int(time.time())}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    meta["path"] = str(out_path)
+    labeled.setdefault("meta", {})
+    labeled["meta"]["path"] = str(out_path)
+
+    out_path.write_text(json.dumps(labeled, indent=2), encoding="utf-8")
+    history_cfg = cfg.get("shadow_history", {}) if isinstance(cfg.get("shadow_history"), dict) else {}
+    history_max = int(history_cfg.get("max_entries", 200)) if history_cfg else 200
+    top_k = max(1, min(limit, int(history_cfg.get("top_k", limit or 10))))
+    history_path = record_history(
+        data_root=data_root,
+        labeled=labeled,
+        summary=summary,
+        source_path=out_path,
+        top_k=top_k,
+        max_entries=history_max,
+    )
+    return labeled, summary, out_path, guard_total, cycle_total, total, history_path
 
 
 def _prepare_script_sandbox(script_path: Path, cfg: dict, sandbox: str | None):
@@ -129,6 +194,530 @@ def rag_search(query: str, k: int = 5, config_path: str = "./configs/config.yaml
     cfg=load_config(config_path); db=MemoryDB(db_path=cfg["db_path"])
     res=retrieval.search(db, query, k=k)
     for r in res: rprint(f"[cyan]{r['kind']}[/cyan] {r['ref_table']}#{r['ref_id']} score={r['score']:.3f}\n{r['preview']}")
+
+
+@app.command()
+def rag_fetch_external(
+    query: str,
+    max_items: int = typer.Option(6, "--max-items", "-m", help="Maximum external items to consider"),
+    min_relevance: float = typer.Option(0.7, "--min-relevance", "-r", help="Minimum relevance (0-1) required"),
+    config_path: str = "./configs/config.yaml",
+):
+    """
+    Pull external research context (arXiv + Semantic Scholar) and merge high-confidence triples into GraphRAG.
+    """
+    cfg = load_config(config_path)
+    db = MemoryDB(db_path=cfg["db_path"])
+    db.ensure_schema()
+    result = retrieval.fetch_external_context(
+        db,
+        query,
+        max_items=max_items,
+        min_relevance=min_relevance,
+    )
+    accepted = result.get("accepted") or []
+    claims = result.get("claims") or []
+    if not accepted:
+        rprint("[yellow]No external items cleared the relevance threshold.[/yellow]")
+        return
+    rprint(f"[green]Merged {len(claims)} claims from {len(accepted)} external items.[/green]")
+    for item in accepted:
+        summary = item.get("summary") or ""
+        snippet = (summary[:160] + "…") if len(summary) > 160 else summary
+        rprint(
+            f"[cyan]{item['source']}[/cyan] score={item.get('relevance', 0):.2f} "
+            f"[link={item.get('url', '')}]{item.get('title', '')}[/link]\n"
+            f"{snippet}\n"
+        )
+
+
+@app.command()
+def rag_cache(
+    query: Optional[str] = typer.Option(None, "--query", "-q", help="Filter cache entries by stored query"),
+    max_items: Optional[int] = typer.Option(None, "--max-items", "-m", help="Cache max-items key (required with --clear)"),
+    clear: bool = typer.Option(False, "--clear", help="Delete the cache entry for the given query/max-items"),
+    clear_all: bool = typer.Option(False, "--clear-all", help="Delete all cached external responses"),
+    show_items: bool = typer.Option(False, "--show-items", help="Print cached item titles (up to 5 per entry)"),
+    limit: int = typer.Option(20, "--limit", "-n", help="Maximum cache entries to display"),
+):
+    """Inspect or clear cached external fetch results (stored under data/external/)."""
+
+    cache_dir = Path("data/external")
+
+    if clear_all:
+        removed = clear_cache(cache_dir=cache_dir)
+        rprint(f"[green]Cleared[/green] {removed} cache file(s).")
+
+    if clear:
+        if not query:
+            rprint("[red]--clear requires --query to select a cache entry.[/red]")
+            raise typer.Exit(1)
+        if max_items is None:
+            rprint("[red]--clear requires --max-items to compute the cache fingerprint.[/red]")
+            raise typer.Exit(1)
+        removed = clear_cache(query=query, max_items=max_items, cache_dir=cache_dir)
+        if removed:
+            rprint(f"[green]Removed cache entry[/green] query='{query}' max_items={max_items}.")
+        else:
+            rprint(f"[yellow]No cache entry found for[/yellow] query='{query}' max_items={max_items}.")
+
+    entries = list_cache_entries(cache_dir=cache_dir)
+    if query:
+        entries = [entry for entry in entries if entry.get("query") == query]
+
+    if not entries:
+        rprint("[yellow]No cached external responses found.[/yellow]")
+        return
+
+    now = time.time()
+    for entry in entries[: max(1, limit)]:
+        ts = entry.get("updated_at")
+        age = ""
+        if ts:
+            minutes = max(0, int((now - ts) // 60))
+            age = f"{minutes}m ago"
+        rprint(
+            f"[cyan]{entry.get('query')}[/cyan] items={entry.get('item_count', 0)} "
+            f"max_items={entry.get('max_items')} path={entry.get('path')} {age}"
+        )
+        if show_items:
+            items = entry.get("items") or []
+            for item in items[:5]:
+                title = str(item.get("title") or "(no title)")
+                source = str(item.get("source") or "-")
+                rprint(f"    - [{source}] {title}")
+            if len(items) > 5:
+                rprint("    …")
+
+
+@app.command()
+def watchers_config(config_path: str = "./configs/config.yaml"):
+    """Print normalized initiative watcher configuration."""
+
+    cfg = load_config(config_path)
+    configs = build_repo_watch_configs(cfg)
+    if not configs:
+        rprint("[yellow]No watcher configuration detected.[/yellow]")
+        return
+
+    for conf in configs:
+        watchers = ", ".join(conf.watchers) or "(none)"
+        rprint(
+            f"[cyan]{conf.path}[/cyan] watchers=[{watchers}] "
+            f"idle={conf.idle_minutes}m git_idle={conf.git_idle_minutes}m "
+            f"timer={conf.timer_minutes}m mode={conf.trigger_mode}"
+        )
+        if conf.verify_rollback:
+            rprint("    verify_rollback: true")
+
+
+@app.command()
+def evolution_status(
+    state_path: Path = typer.Option(Path("data/evolution/state.json"), "--state-path", "-s", help="Path to evolution state file"),
+    recent: int = typer.Option(5, "--recent", "-n", help="Number of recent cycles to display"),
+):
+    """Inspect evolution history and current meta-learning adjustments."""
+
+    state_path = state_path.expanduser().resolve()
+    if not state_path.exists():
+        rprint(f"[yellow]No evolution state found at[/yellow] {state_path}")
+        return
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        rprint(f"[red]Failed to read state:[/red] {exc}")
+        return
+
+    adjustments = state.get("meta_adjustments") or {}
+    meta_stats = (state.get("meta_learner") or {}).get("stats") or {}
+    history = state.get("history") or []
+    empty_streak = state.get("empty_streak", 0)
+
+    rprint(f"[bold]State path:[/bold] {state_path}")
+    if adjustments:
+        rprint("[green]Active adjustments:[/green]", ", ".join(f"{k}={v}" for k, v in adjustments.items()))
+    else:
+        rprint("[green]Active adjustments:[/green] none (defaults in effect)")
+
+    if meta_stats:
+        rprint(
+            "[blue]Meta stats:[/blue]",
+            ", ".join(f"{k}={meta_stats[k]}" for k in sorted(meta_stats)),
+        )
+    rprint(f"[cyan]Empty bullet streak:[/cyan] {empty_streak}")
+
+    if history:
+        recent_entries = history[-max(1, recent):]
+        rprint(f"[bold]Last {len(recent_entries)} cycle(s):[/bold]")
+        for entry in recent_entries:
+            episode = entry.get("episode_id")
+            action = entry.get("action") or "(none)"
+            bullets = len(entry.get("bullets") or [])
+            reward = entry.get("reward", "n/a")
+            rprint(f"- episode={episode} action={action} bullets={bullets} reward={reward}")
+@app.command("shadow_report")
+def shadow_report(
+    limit: int = typer.Option(20, "--limit", "-n", help="Number of recent clips to display"),
+    kind: Optional[str] = typer.Option(None, "--kind", help="Filter by clip kind (e.g. cycle, guard)"),
+    config_path: str = typer.Option("./configs/config.yaml", "--config-path", help="Path to Symbiont config file"),
+):
+    """Summarize shadow clips captured during orchestration and guard runs."""
+    cfg = load_config(config_path)
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    clip_dir = data_root / "artifacts" / "shadow"
+    clip_path = clip_dir / "shadow_clips.jsonl"
+    if not clip_path.exists():
+        rprint(f"[yellow]No shadow clips found at[/yellow] {clip_path}")
+        return
+
+    total = 0
+    kind_counts: Counter[str] = Counter()
+    tag_counts: Counter[str] = Counter()
+    filtered = deque(maxlen=max(limit, 1))
+
+    with clip_path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                clip = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            total += 1
+            clip_kind = clip.get("kind", "unknown")
+            kind_counts[clip_kind] += 1
+            for tag in clip.get("tags") or []:
+                tag_counts[str(tag)] += 1
+            if kind is None or clip_kind == kind:
+                filtered.append(clip)
+
+    if not total:
+        rprint("[yellow]Shadow log exists but contains no entries.[/yellow]")
+        return
+
+    rprint(f"[green]Shadow clips:[/green] total={total} path={clip_path}")
+    rprint("[bold]By kind:[/bold]", ", ".join(f"{k}={v}" for k, v in kind_counts.items()))
+    if tag_counts:
+        top_tags = ", ".join(f"{tag}={count}" for tag, count in tag_counts.most_common(6))
+        rprint("[bold]Top tags:[/bold]", top_tags)
+
+    if not filtered:
+        rprint("[yellow]No clips match the requested filters.[/yellow]")
+        return
+
+    rprint(f"[bold]Last {len(filtered)} clip(s):[/bold]")
+    for clip in filtered:
+        ts = clip.get("ts")
+        dt = datetime.fromtimestamp(ts).isoformat() if isinstance(ts, int) else "n/a"
+        clip_kind = clip.get("kind", "unknown")
+        tags = ", ".join(clip.get("tags") or []) or "-"
+        meta = clip.get("meta") or {}
+        payload = clip.get("payload") or {}
+        preview = ""
+        if clip_kind == "cycle":
+            decision = payload.get("decision", {})
+            preview = decision.get("action") or ""
+        elif clip_kind == "guard":
+            analysis = payload.get("analysis", {})
+            preview = f"rogue={analysis.get('rogue_score')}"
+        preview = (preview or json.dumps(payload)[:80]).strip()
+        rprint(f"- [{dt}] {clip_kind} tags={tags} meta={meta} :: {preview}")
+
+@app.command("shadow_curate")
+def shadow_curate(
+    guard_threshold: float = typer.Option(0.5, help="Rogue score threshold for high-risk guard clips"),
+    reward_threshold: float = typer.Option(0.5, help="Reward threshold for low-performing cycles"),
+    limit: int = typer.Option(10, "--limit", "-n", help="Maximum entries per bucket"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Write summary JSON to this path"),
+    config_path: str = typer.Option("./configs/config.yaml", "--config-path", help="Path to Symbiont config file"),
+):
+    """Rank shadow clips and surface high-signal guard/cycle examples."""
+    cfg = load_config(config_path)
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    clip_dir = data_root / "artifacts" / "shadow"
+    clip_path = clip_dir / "shadow_clips.jsonl"
+    curator = ShadowCurator(clip_path)
+    summary = curator.curate(
+        guard_threshold=guard_threshold,
+        guard_limit=limit,
+        reward_threshold=reward_threshold,
+        cycle_limit=limit,
+        limit=limit,
+    )
+    meta = summary["meta"]
+    counts = meta["counts"]
+    total = counts.get("total", 0)
+    by_kind = counts.get("by_kind") or {}
+    rprint(f"[green]Curated shadow summary[/green] — path={meta['path']} total={total}")
+    if by_kind:
+        breakdown = ", ".join(f"{k}={v}" for k, v in by_kind.items())
+        rprint("[bold]Kind breakdown:[/bold]", breakdown)
+    if not total:
+        return
+    guards_high = summary["guards"]["high"]
+    guards_medium = summary["guards"]["medium"]
+    cycles_low = summary["cycles"]["low_reward"]
+    if guards_high:
+        rprint(f"[bold]High-risk guards (>= {guard_threshold}):[/bold]")
+        for clip in guards_high:
+            script = clip["payload"].get("script_path") or clip["payload"].get("analysis", {}).get("path")
+            score = clip.get("rogue_score")
+            rprint(f"- rogue={score} script={script} tags={clip.get('tags')}")
+    if guards_medium:
+        rprint(f"[bold]Medium-risk guards (>= {guard_threshold*0.5:.2f}):[/bold]")
+        for clip in guards_medium:
+            script = clip["payload"].get("script_path") or clip["payload"].get("analysis", {}).get("path")
+            score = clip.get("rogue_score")
+            rprint(f"- rogue={score} script={script} tags={clip.get('tags')}")
+    if cycles_low:
+        rprint(f"[bold]Low-reward cycles (<= {reward_threshold}):[/bold]")
+        for clip in cycles_low:
+            action = (clip["payload"].get("decision") or {}).get("action")
+            reward = clip.get("reward")
+            rprint(f"- reward={reward} action={action}")
+    if output:
+        out_path = Path(output).expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        rprint(f"[green]Summary written to[/green] {out_path}")
+
+@app.command("shadow_label")
+def shadow_label(
+    guard_threshold: float = typer.Option(0.5, help="Rogue score threshold for high-risk guard clips"),
+    reward_threshold: float = typer.Option(0.5, help="Reward threshold for low-performing cycles"),
+    limit: int = typer.Option(10, "--limit", "-n", help="Maximum entries per bucket"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Write labeled JSON to this path"),
+    ingest: bool = typer.Option(False, "--ingest/--no-ingest", help="Immediately ingest top labels into beliefs"),
+    ingest_top: int = typer.Option(5, "--ingest-top", "-k", help="How many labels to ingest when --ingest is set"),
+    config_path: str = typer.Option("./configs/config.yaml", "--config-path", help="Path to Symbiont config file"),
+):
+    """Curate and label shadow clips for downstream training."""
+    cfg = load_config(config_path)
+    labeled, summary, out_path, guard_total, cycle_total, total, history_path = _label_shadow(
+        cfg,
+        guard_threshold=guard_threshold,
+        reward_threshold=reward_threshold,
+        limit=limit,
+        output=output,
+    )
+    meta = summary.get("meta", {})
+    label_counts = labeled["labels"]["counts"]
+    rprint(f"[green]Labeled shadow clips[/green] — path={meta.get('path')} total={total}")
+    if label_counts:
+        top_labels = ", ".join(f"{label}={count}" for label, count in Counter(label_counts).most_common(10))
+        rprint("[bold]Top labels:[/bold]", top_labels)
+    else:
+        rprint("[yellow]No labels generated (shadow log may be empty).[/yellow]")
+    rprint(f"[green]Labeled summary written to[/green] {out_path}")
+    rprint(f"[dim]History appended at[/dim] {history_path}")
+
+    summary_line = f"Shadow labels guards={guard_total} cycles={cycle_total} total={total}"
+    try:
+        db = MemoryDB(db_path=cfg["db_path"])
+        db.ensure_schema()
+        db.add_artifact(task_id=None, kind="shadow_labels", path=str(out_path), summary=summary_line)
+        retrieval.build_indices(db, limit_if_new=64)
+        if ingest:
+            digest = ingest_labels(db, summary=labeled, source_path=out_path, top=ingest_top)
+            retrieval.build_indices(db, limit_if_new=64)
+            top_labels = ", ".join(f"{label}={count}" for label, count in digest["top"]) or "(none)"
+            rprint(f"[green]Ingested labels:[/green] {top_labels}")
+    except Exception as exc:  # pragma: no cover - best effort
+        rprint(f"[yellow]Failed to record shadow labels artifact:[/yellow] {exc}")
+
+@app.command("shadow_ingest")
+def shadow_ingest(
+    path: Optional[str] = typer.Option(None, "--path", "-p", help="Path to labeled shadow JSON"),
+    top: int = typer.Option(5, "--top", "-k", help="Number of top labels to ingest"),
+    config_path: str = typer.Option("./configs/config.yaml", "--config-path", help="Path to Symbiont config file"),
+):
+    """Convert labeled shadow summaries into beliefs and memory messages."""
+    cfg = load_config(config_path)
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    if path:
+        label_path = Path(path).expanduser().resolve()
+        if not label_path.exists():
+            rprint(f"[red]Labeled summary not found:[/red] {label_path}")
+            raise typer.Exit(1)
+    else:
+        label_path = latest_labeled_path(data_root)
+        if not label_path:
+            rprint("[yellow]No labeled shadow summaries found. Run `shadow_label` first.[/yellow]")
+            raise typer.Exit(1)
+
+    try:
+        labeled = load_labeled_summary(label_path)
+    except Exception as exc:
+        rprint(f"[red]Failed to read labeled summary:[/red] {exc}")
+        raise typer.Exit(1)
+
+    db = MemoryDB(db_path=cfg["db_path"])
+    db.ensure_schema()
+    digest = ingest_labels(db, summary=labeled, source_path=label_path, top=top)
+    retrieval.build_indices(db, limit_if_new=64)
+
+    top_labels = ", ".join(f"{label}={count}" for label, count in digest["top"]) or "(none)"
+    rprint(f"[green]Ingested shadow labels[/green] source={label_path}")
+    rprint(f"[bold]Top labels:[/bold] {top_labels}")
+    rprint(
+        f"[dim]guards={digest['guard_total']} cycles={digest['cycle_total']} total_labels={len(digest['counts'])}[/dim]"
+    )
+
+@app.command("shadow_dashboard")
+def shadow_dashboard(
+    path: Optional[str] = typer.Option(None, "--path", "-p", help="Path to labeled shadow JSON"),
+    output: Optional[str] = typer.Option("systems/ShadowDashboard.md", "--output", "-o", help="Location to write markdown"),
+    top: int = typer.Option(10, "--top", "-k", help="Number of top labels to display"),
+    include_ingest: bool = typer.Option(False, "--include-ingest", help="Display latest ingest summary in dashboard"),
+    to_stdout: bool = typer.Option(False, "--stdout/--no-stdout", help="Print dashboard markdown to stdout"),
+    config_path: str = typer.Option("./configs/config.yaml", "--config-path", help="Path to Symbiont config file"),
+):
+    """Render a markdown dashboard for labeled shadow data."""
+    cfg = load_config(config_path)
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    if path:
+        label_path = Path(path).expanduser().resolve()
+        if not label_path.exists():
+            rprint(f"[red]Labeled summary not found:[/red] {label_path}")
+            raise typer.Exit(1)
+    else:
+        label_path = latest_labeled_path(data_root)
+        if not label_path:
+            rprint("[yellow]No labeled shadow summaries found. Run `shadow_label` first.[/yellow]")
+            raise typer.Exit(1)
+
+    try:
+        labeled = load_labeled_summary(label_path)
+    except Exception as exc:
+        rprint(f"[red]Failed to read labeled summary:[/red] {exc}")
+        raise typer.Exit(1)
+
+    digest = summarize_labels(labeled, top=top) if include_ingest else None
+    markdown = render_dashboard(labeled=labeled, ingest_digest=digest, top_limit=top)
+
+    if output:
+        out_path = Path(output).expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(markdown, encoding="utf-8")
+        rprint(f"[green]Dashboard written to[/green] {out_path}")
+
+    if to_stdout or not output:
+        rprint(markdown)
+
+@app.command("shadow_history")
+def shadow_history(
+    limit: int = typer.Option(10, "--limit", "-n", help="Number of history entries to display"),
+    as_json: bool = typer.Option(False, "--json", help="Emit raw JSON instead of human summary"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Write markdown summary to this path"),
+    config_path: str = typer.Option("./configs/config.yaml", "--config-path", help="Path to Symbiont config file"),
+):
+    """Show recent shadow label history entries."""
+    cfg = load_config(config_path)
+    data_root = Path(cfg.get("data_root") or Path(cfg.get("db_path", "./data/symbiont.db")).parent)
+    entries = load_history(data_root, limit=limit)
+    if not entries:
+        rprint("[yellow]No shadow history entries yet. Run `shadow_label` to generate one.[/yellow]")
+        return
+    if as_json:
+        rprint(json.dumps(entries, indent=2))
+    else:
+        rprint(f"[green]Shadow history entries[/green] total={len(entries)}")
+        for entry in entries:
+            ts = entry.get("ts")
+            ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts or 0))
+            top = ", ".join(f"{label}={count}" for label, count in entry.get("top") or []) or "(none)"
+            rprint(
+                f"- [{ts_text}] guards={entry.get('guard_total')} cycles={entry.get('cycle_total')} labels={entry.get('total_labels')}\n  top: {top}"
+            )
+
+    if output:
+        out_path = Path(output).expanduser().resolve()
+        lines: List[str] = ["# Shadow History", ""]
+        aggregate: Counter[str] = Counter()
+        occurrences: Counter[str] = Counter()
+        for entry in entries:
+            for label, count in entry.get("top") or []:
+                aggregate[label] += int(count)
+                occurrences[label] += 1
+        if aggregate:
+            lines.extend([
+                "## Aggregated Labels",
+                "",
+                "| Label | Total Count | Occurrences |",
+                "| --- | --- | --- |",
+            ])
+            for label, total_count in aggregate.most_common(10):
+                lines.append(f"| `{label}` | {total_count} | {occurrences[label]} |")
+        else:
+            lines.extend(["## Aggregated Labels", "", "(none)"])
+
+        lines.extend(["", "## Recent Runs", ""])
+        for entry in entries:
+            ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry.get("ts", 0)))
+            top = ", ".join(f"{label}={count}" for label, count in entry.get("top") or []) or "(none)"
+            lines.append(
+                f"- **{ts_text}** — guards={entry.get('guard_total')} cycles={entry.get('cycle_total')} labels={entry.get('total_labels')}; top: {top}"
+            )
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        rprint(f"[green]History summary written to[/green] {out_path}")
+
+@app.command("shadow_batch")
+def shadow_batch(
+    guard_threshold: float = typer.Option(0.5, help="Rogue score threshold for high-risk guard clips"),
+    reward_threshold: float = typer.Option(0.5, help="Reward threshold for low-performing cycles"),
+    limit: int = typer.Option(10, "--limit", "-n", help="Maximum entries per bucket"),
+    ingest_top: int = typer.Option(5, "--ingest-top", "-k", help="How many labels to ingest"),
+    label_output: Optional[str] = typer.Option(None, "--label-output", help="Write labeled JSON to this path"),
+    dashboard_output: Optional[str] = typer.Option("systems/ShadowDashboard.md", "--dashboard-output", help="Location to write dashboard markdown"),
+    dashboard_top: int = typer.Option(10, "--dashboard-top", help="Number of top labels to display on dashboard"),
+    to_stdout: bool = typer.Option(False, "--stdout/--no-stdout", help="Print dashboard markdown to stdout"),
+    config_path: str = typer.Option("./configs/config.yaml", "--config-path", help="Path to Symbiont config file"),
+):
+    """Run labeling, ingestion, and dashboard generation in one step."""
+    cfg = load_config(config_path)
+    labeled, summary, label_path, guard_total, cycle_total, total, history_path = _label_shadow(
+        cfg,
+        guard_threshold=guard_threshold,
+        reward_threshold=reward_threshold,
+        limit=limit,
+        output=label_output,
+    )
+    counts = labeled["labels"]["counts"]
+    meta = summary.get("meta", {})
+    rprint(f"[green]Labeled shadow clips[/green] — path={meta.get('path')} total={total}")
+    if counts:
+        top_labels = ", ".join(f"{label}={count}" for label, count in Counter(counts).most_common(10))
+        rprint("[bold]Top labels:[/bold]", top_labels)
+    else:
+        rprint("[yellow]No labels generated (shadow log may be empty).[/yellow]")
+    rprint(f"[green]Labeled summary written to[/green] {label_path}")
+    rprint(f"[dim]History appended at[/dim] {history_path}")
+
+    summary_line = f"Shadow labels guards={guard_total} cycles={cycle_total} total={total}"
+    digest = None
+    try:
+        db = MemoryDB(db_path=cfg["db_path"])
+        db.ensure_schema()
+        db.add_artifact(task_id=None, kind="shadow_labels", path=str(label_path), summary=summary_line)
+        retrieval.build_indices(db, limit_if_new=64)
+        digest = ingest_labels(db, summary=labeled, source_path=label_path, top=ingest_top)
+        retrieval.build_indices(db, limit_if_new=64)
+        top_ingested = ", ".join(f"{label}={count}" for label, count in digest["top"]) or "(none)"
+        rprint(f"[green]Ingested labels:[/green] {top_ingested}")
+    except Exception as exc:  # pragma: no cover - best effort
+        rprint(f"[yellow]Failed to ingest labels:[/yellow] {exc}")
+
+    markdown = render_dashboard(labeled=labeled, ingest_digest=digest, top_limit=dashboard_top)
+    if dashboard_output:
+        dashboard_path = Path(dashboard_output).expanduser().resolve()
+        dashboard_path.parent.mkdir(parents=True, exist_ok=True)
+        dashboard_path.write_text(markdown, encoding="utf-8")
+        rprint(f"[green]Dashboard written to[/green] {dashboard_path}")
+    if to_stdout or not dashboard_output:
+        rprint(markdown)
 
 @app.command()
 def scan(path: str = "."):

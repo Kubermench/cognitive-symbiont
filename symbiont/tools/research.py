@@ -29,9 +29,11 @@ from tenacity import (
 )
 
 from symbiont.llm.client import LLMClient
+from symbiont.memory.db import MemoryDB
+from symbiont.memory import retrieval
+from symbiont.memory.dynamic_analyzer import BayesianTrendAnalyzer, deduplicate_triples
 from symbiont.tools.arxiv_fetcher import search_arxiv
 from symbiont.tools.files import ensure_dirs
-from symbiont.memory.dynamic_analyzer import BayesianTrendAnalyzer, deduplicate_triples
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +163,13 @@ def _save_source_plot(topic: str, stats: Dict[str, Dict[str, float]]) -> Optiona
     if not stats:
         return None
     try:
+        import matplotlib
+        try:
+            backend = matplotlib.get_backend()
+        except Exception:
+            backend = None
+        if not backend or not str(backend).lower().startswith("agg"):
+            matplotlib.use("Agg")  # type: ignore[arg-type]
         import matplotlib.pyplot as plt
     except Exception:  # pragma: no cover - optional dependency
         return None
@@ -177,19 +186,24 @@ def _save_source_plot(topic: str, stats: Dict[str, Dict[str, float]]) -> Optiona
     ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     path = ARTIFACT_ROOT / f"{ts}_sources.png"
 
-    fig, ax = plt.subplots(figsize=(6, 3.5))
-    bars = ax.bar(labels, counts, color="#4b9cd3")
-    ax.set_title(f"Source mix for {topic[:40]}")
-    ax.set_ylabel("Items")
-    ax.set_ylim(0, max(counts) * 1.2)
-    for bar, avg in zip(bars, avgs):
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width() / 2, height + 0.05, f"avg={avg:.2f}", ha="center", va="bottom", fontsize=8)
-    fig.tight_layout()
+    fig = None
+    ax = None
     try:
+        fig, ax = plt.subplots(figsize=(6, 3.5))
+        bars = ax.bar(labels, counts, color="#4b9cd3")
+        ax.set_title(f"Source mix for {topic[:40]}")
+        ax.set_ylabel("Items")
+        ax.set_ylim(0, max(counts) * 1.2)
+        for bar, avg in zip(bars, avgs):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width() / 2, height + 0.05, f"avg={avg:.2f}", ha="center", va="bottom", fontsize=8)
+        fig.tight_layout()
         fig.savefig(path, dpi=150)
+    except Exception:
+        return None
     finally:
-        plt.close(fig)
+        if fig is not None:
+            plt.close(fig)
     return str(path)
 
 
@@ -232,7 +246,38 @@ def scout_insights(llm: LLMClient, query: str, *, max_items: int = 3) -> Dict[st
         for result in _fetch_live_sources(query, max_items):
             normalized.append(result)
 
+    external_meta: Dict[str, Any] = {}
+    with suppress(Exception):
+        db = MemoryDB()
+        db.ensure_schema()
+        external = retrieval.fetch_external_context(
+            db,
+            query,
+            max_items=max(4, max_items * 2),
+            min_relevance=0.65,
+        )
+        accepted = external.get("accepted") or []
+        external_meta = {
+            "accepted_items": len(accepted),
+            "claims_merged": len(external.get("claims") or []),
+        }
+        for item in accepted:
+            normalized.append(
+                {
+                    "title": str(item.get("title", "External Insight"))[:140],
+                    "url": str(item.get("url", ""))[:240],
+                    "summary": str(item.get("summary", ""))[:200],
+                    "source": str(item.get("source", "external"))[:40] or "external",
+                    "published": str(
+                        (item.get("metadata") or {}).get("published")
+                        or (item.get("metadata") or {}).get("year", "")
+                    )[:32],
+                }
+            )
+
     enriched = _rank_and_dedup(query, normalized)
+    if external_meta:
+        enriched.setdefault("meta", {}).update({"external_context": external_meta})
     return enriched
 
 

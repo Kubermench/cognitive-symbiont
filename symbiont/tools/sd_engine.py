@@ -10,11 +10,14 @@ foresight runs on edge hardware.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
+
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 __all__ = [
     "Stock",
@@ -242,6 +245,13 @@ def _try_make_plot(
     artifacts_dir: Path | str,
 ) -> Optional[str]:
     try:
+        import matplotlib
+        try:
+            backend = matplotlib.get_backend()
+        except Exception:
+            backend = None
+        if not backend or not str(backend).lower().startswith("agg"):
+            matplotlib.use("Agg")  # type: ignore[arg-type]
         import matplotlib.pyplot as plt
     except Exception:  # pragma: no cover - matplotlib optional
         return None
@@ -249,18 +259,22 @@ def _try_make_plot(
     artifacts_dir = Path(artifacts_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     times = [point["time"] for point in timeline]
-    plt.figure(figsize=(6, 4))
-    for stock in stocks:
-        plt.plot(times, [point[stock.name] for point in timeline], label=stock.name)
-    plt.xlabel("Time")
-    plt.ylabel("Value")
-    plt.title("System Dynamics Projection")
-    plt.legend()
-    plt.tight_layout()
-    path = artifacts_dir / f"sd_projection_{int(timeline[-1]['time'])}.png"
-    plt.savefig(path)
-    plt.close()
-    return str(path)
+    fig = plt.figure(figsize=(6, 4))
+    try:
+        for stock in stocks:
+            plt.plot(times, [point[stock.name] for point in timeline], label=stock.name)
+        plt.xlabel("Time")
+        plt.ylabel("Value")
+        plt.title("System Dynamics Projection")
+        plt.legend()
+        plt.tight_layout()
+        path = artifacts_dir / f"sd_projection_{int(timeline[-1]['time'])}.png"
+        plt.savefig(path, dpi=150)
+        return str(path)
+    except Exception:
+        return None
+    finally:
+        plt.close(fig)
 
 
 def _coerce_optional(value: object) -> Optional[float]:

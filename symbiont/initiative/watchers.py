@@ -2,12 +2,34 @@ from __future__ import annotations
 import os, time, subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Iterable, List
+from typing import Optional, Iterable, List, Tuple, Dict
 
 try:
     import yaml
 except Exception:  # pragma: no cover - yaml should be available but keep optional
     yaml = None
+
+_SCAN_CACHE: Dict[str, Tuple[float, int]] = {}
+_SCAN_TTL_SECONDS = 30
+_SCAN_SKIP_DIRS = {".git", "data", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".idea", ".vscode"}
+
+def _cached_latest_mtime(root: str) -> int:
+    now = time.time()
+    cached = _SCAN_CACHE.get(root)
+    if cached and (now - cached[0]) < _SCAN_TTL_SECONDS:
+        return cached[1]
+    latest = 0
+    for r, ds, fs in os.walk(root):
+        ds[:] = [d for d in ds if d not in _SCAN_SKIP_DIRS]
+        for fn in fs:
+            try:
+                m = int(os.path.getmtime(os.path.join(r, fn)))
+                if m > latest:
+                    latest = m
+            except Exception:
+                continue
+    _SCAN_CACHE[root] = (now, latest)
+    return latest
 
 
 @dataclass
@@ -155,17 +177,7 @@ class FileIdleWatcher:
         self._last_mtime_seen = 0
 
     def check(self) -> Optional[WatchEvent]:
-        latest = 0
-        skip_dirs = {".git", "data", ".venv", "node_modules", "__pycache__"}
-        for r, ds, fs in os.walk(self.root):
-            ds[:] = [d for d in ds if d not in skip_dirs]
-            for fn in fs:
-                try:
-                    m = int(os.path.getmtime(os.path.join(r, fn)))
-                    if m > latest:
-                        latest = m
-                except Exception:
-                    pass
+        latest = _cached_latest_mtime(self.root)
         if not latest:
             return None
         minutes = (time.time() - latest) / 60

@@ -47,6 +47,12 @@ foresight:
       - devin
     max_items: 2
     llm_override: {}
+retrieval:
+  external:
+    enabled: false
+    max_items: 6
+    min_relevance: 0.7
+    log: true
 evolution:
   enabled: true
   repeat_threshold: 3

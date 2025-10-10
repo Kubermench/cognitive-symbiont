@@ -13,6 +13,7 @@ from symbiont.llm.client import LLMClient
 from symbiont.llm.budget import TokenBudget
 from symbiont.tools import systems_os
 from symbiont.tools.zk_prover import prove_diff, verify_diff
+from symbiont.observability.shadow import ShadowClipCollector
 
 RISK_PATTERNS = [
     (re.compile(r"rm\s+-rf\s+/"), 0.8, "Deletes root directory"),
@@ -44,6 +45,11 @@ CYNEFIN_RULES = {
     "chaotic": "Act → Sense → Respond",
     "disorder": "Gather more information",
 }
+
+try:
+    _SHADOW_COLLECTOR = ShadowClipCollector(Path("data/artifacts/shadow"))
+except Exception:  # pragma: no cover - defensive
+    _SHADOW_COLLECTOR = None
 
 
 def analyze_script(script_path: Path) -> Dict[str, any]:
@@ -78,7 +84,7 @@ def analyze_script(script_path: Path) -> Dict[str, any]:
     proof = build_safety_proof(script_path)
     zk_stub = generate_zk_stub(proof)
 
-    return {
+    result = {
         "path": str(script_path),
         "rogue_score": round(score, 2),
         "issues": issues,
@@ -86,6 +92,24 @@ def analyze_script(script_path: Path) -> Dict[str, any]:
         "proof": proof,
         "zk_stub": zk_stub,
     }
+    if _SHADOW_COLLECTOR:
+        tags = ["guard"]
+        rogue = result["rogue_score"]
+        if rogue >= 0.5:
+            tags.append("rogue:high")
+        elif rogue >= 0.25:
+            tags.append("rogue:medium")
+        meta = {"issues": len(issues), "analysis": "analyze_script"}
+        try:
+            _SHADOW_COLLECTOR.record_guard(
+                script_path=script_path,
+                analysis=result,
+                tags=tags,
+                meta=meta,
+            )
+        except Exception:
+            pass
+    return result
 
 
 def _judge_with_llm(

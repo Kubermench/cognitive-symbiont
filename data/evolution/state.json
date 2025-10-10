@@ -29,7 +29,255 @@
       "action": "No obvious quick refactors; run scan",
       "bullets": [],
       "ts": 1759408632
+    },
+    {
+      "episode_id": 1,
+      "action": "Refine plan",
+      "bullets": [],
+      "ts": 1760074244,
+      "reward": 0.3
+    },
+    {
+      "episode_id": 2,
+      "action": "Refine plan",
+      "bullets": [],
+      "ts": 1760074244,
+      "reward": 0.3
+    },
+    {
+      "episode_id": 3,
+      "action": "Refine plan",
+      "bullets": [],
+      "ts": 1760074253,
+      "reward": 0.3
+    },
+    {
+      "episode_id": 4,
+      "action": "Refine plan",
+      "bullets": [],
+      "ts": 1760074262,
+      "reward": 0.3
+    },
+    {
+      "episode_id": 1,
+      "action": "Refine plan",
+      "bullets": [],
+      "ts": 1760074271,
+      "reward": 0.3
+    },
+    {
+      "episode_id": 2,
+      "action": "Refine plan",
+      "bullets": [],
+      "ts": 1760074279,
+      "reward": 0.3
+    },
+    {
+      "episode_id": 3,
+      "action": "Refine plan",
+      "bullets": [],
+      "ts": 1760074289,
+      "reward": 0.3
+    },
+    {
+      "episode_id": 4,
+      "action": "Refine plan",
+      "bullets": [],
+      "ts": 1760074299,
+      "reward": 0.3
+    },
+    {
+      "episode_id": 10,
+      "action": "Action 0",
+      "bullets": [
+        "step 0"
+      ],
+      "ts": 1760074308,
+      "reward": 0.85
+    },
+    {
+      "episode_id": 11,
+      "action": "Action 1",
+      "bullets": [
+        "step 1"
+      ],
+      "ts": 1760074308,
+      "reward": 0.85
+    },
+    {
+      "episode_id": 12,
+      "action": "Action 2",
+      "bullets": [
+        "step 2"
+      ],
+      "ts": 1760074308,
+      "reward": 0.85
+    },
+    {
+      "episode_id": 13,
+      "action": "Action 3",
+      "bullets": [
+        "step 3"
+      ],
+      "ts": 1760074308,
+      "reward": 0.85
+    },
+    {
+      "episode_id": 14,
+      "action": "Action 4",
+      "bullets": [
+        "step 4"
+      ],
+      "ts": 1760074308,
+      "reward": 0.85
+    },
+    {
+      "episode_id": 15,
+      "action": "Action 5",
+      "bullets": [
+        "step 5"
+      ],
+      "ts": 1760074308,
+      "reward": 0.85
+    },
+    {
+      "episode_id": 16,
+      "action": "Action 6",
+      "bullets": [
+        "step 6"
+      ],
+      "ts": 1760074308,
+      "reward": 0.85
+    },
+    {
+      "episode_id": 17,
+      "action": "Action 7",
+      "bullets": [
+        "step 7"
+      ],
+      "ts": 1760074308,
+      "reward": 0.85
+    },
+    {
+      "episode_id": 18,
+      "action": "Action 8",
+      "bullets": [
+        "step 8"
+      ],
+      "ts": 1760074308,
+      "reward": 0.85
+    },
+    {
+      "episode_id": 19,
+      "action": "Action 9",
+      "bullets": [
+        "step 9"
+      ],
+      "ts": 1760074308,
+      "reward": 0.85
+    },
+    {
+      "episode_id": 20,
+      "action": "Action 10",
+      "bullets": [
+        "step 10"
+      ],
+      "ts": 1760074308,
+      "reward": 0.85
+    },
+    {
+      "episode_id": 21,
+      "action": "Action 11",
+      "bullets": [
+        "step 11"
+      ],
+      "ts": 1760074308,
+      "reward": 0.85
     }
   ],
-  "empty_streak": 0
+  "empty_streak": 0,
+  "meta_learner": {
+    "window": [
+      {
+        "action": "Action 0",
+        "reward": 0.85,
+        "bullets": 1,
+        "ts": 1760074308
+      },
+      {
+        "action": "Action 1",
+        "reward": 0.85,
+        "bullets": 1,
+        "ts": 1760074308
+      },
+      {
+        "action": "Action 2",
+        "reward": 0.85,
+        "bullets": 1,
+        "ts": 1760074308
+      },
+      {
+        "action": "Action 3",
+        "reward": 0.85,
+        "bullets": 1,
+        "ts": 1760074308
+      },
+      {
+        "action": "Action 4",
+        "reward": 0.85,
+        "bullets": 1,
+        "ts": 1760074308
+      },
+      {
+        "action": "Action 5",
+        "reward": 0.85,
+        "bullets": 1,
+        "ts": 1760074308
+      },
+      {
+        "action": "Action 6",
+        "reward": 0.85,
+        "bullets": 1,
+        "ts": 1760074308
+      },
+      {
+        "action": "Action 7",
+        "reward": 0.85,
+        "bullets": 1,
+        "ts": 1760074308
+      },
+      {
+        "action": "Action 8",
+        "reward": 0.85,
+        "bullets": 1,
+        "ts": 1760074308
+      },
+      {
+        "action": "Action 9",
+        "reward": 0.85,
+        "bullets": 1,
+        "ts": 1760074308
+      },
+      {
+        "action": "Action 10",
+        "reward": 0.85,
+        "bullets": 1,
+        "ts": 1760074308
+      },
+      {
+        "action": "Action 11",
+        "reward": 0.85,
+        "bullets": 1,
+        "ts": 1760074308
+      }
+    ],
+    "overrides": {},
+    "stats": {
+      "avg_reward": 0.85,
+      "diversity": 1.0,
+      "zero_bullet_ratio": 0.0,
+      "window": 12
+    }
+  },
+  "meta_adjustments": {}
 }

@@ -22,5 +22,149 @@
     "details": {
       "strategy": "promote_diversity"
     }
+  },
+  "1760074253": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760074253.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760074262": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760074262.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760074271": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760074271.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760074279": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760074279.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760074289": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760074289.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760074299": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760074299.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760074338": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760074338.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760074346": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760074346.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760074363": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760074363.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760074372": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760074372.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760077235": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760077235.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760077244": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760077244.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760077262": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760077262.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760077271": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760077271.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760077546": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760077546.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760077554": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760077554.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760077571": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760077571.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
+  },
+  "1760077579": {
+    "kind": "planner_prompt",
+    "rationale": "Action 'Refine plan' repeated 2x; tweak architect prompt for diversity.",
+    "diff": "/Users/rohit_jadhav/Downloads/cog_symbiont_mvp_v2p3_7abb87ac35bd/data/artifacts/mutations/mutation_1760077579.diff",
+    "details": {
+      "strategy": "promote_diversity"
+    }
   }
 }

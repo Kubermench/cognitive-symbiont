@@ -30,6 +30,8 @@ from .state import get_state_store, resolve_node_id
 STATE_DIR = os.path.join("./data", "initiative")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
 STOP_PATH = os.path.join(STATE_DIR, "STOP")
+_FILE_SCAN_CACHE: Dict[str, Tuple[int, int]] = {}
+_FILE_SCAN_TTL_SECONDS = 30
 
 
 class CollaborationModel(BaseModel):
@@ -156,6 +158,10 @@ def _git_is_dirty(path: str) -> bool:
 
 
 def _latest_file_mtime(path: str) -> int:
+    now = int(time.time())
+    cached = _FILE_SCAN_CACHE.get(path)
+    if cached and (now - cached[0]) < _FILE_SCAN_TTL_SECONDS:
+        return cached[1]
     latest = 0
     skip_dirs = {".git", "data", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".idea", ".vscode"}
     for root, dirs, files in os.walk(path):
@@ -169,6 +175,7 @@ def _latest_file_mtime(path: str) -> int:
                     latest = m
             except Exception:
                 pass
+    _FILE_SCAN_CACHE[path] = (now, latest)
     return latest
 
 

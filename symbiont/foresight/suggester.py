@@ -55,6 +55,14 @@ class ForesightSuggester:
     def draft(self, insight: Dict[str, Any], *, context: Dict[str, Any] | None = None) -> Dict[str, Any]:
         context = context or {}
         proposal = research.draft_proposal(self.llm, insight)
+        topic = str(insight.get("topic") or context.get("query") or "foresight")
+        if not str(proposal.get("proposal", "")).strip():
+            fallback = research.build_fallback_proposal(topic, insight)
+            proposal["proposal"] = fallback["proposal"]
+            proposal.setdefault("diff", fallback["diff"])
+        elif not str(proposal.get("diff", "")).strip():
+            fallback = research.build_fallback_proposal(topic, insight)
+            proposal["diff"] = fallback["diff"]
         triples: Sequence[Sequence[str]] = context.get("triples") or []
         risk = _basic_causal_score(proposal, triples)
         proposal["causal_risk"] = round(risk, 3)
