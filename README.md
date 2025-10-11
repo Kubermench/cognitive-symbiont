@@ -1,7 +1,7 @@
-# Cognitive Symbiont — MVP v3.5 Autonomous Edition
+# Cognitive Symbiont — MVP v3.6 Autonomous Edition
 This bundle includes RAG memory, a local-first LLM adapter, a Streamlit homebase, script generation, initiative daemon (file/git/timer), Beliefs v1, and stubs for Voice/IDE.
 
-## Initiative & Watchers (v3.5)
+## Initiative & Watchers (v3.6)
 - Daemon: `python -m symbiont.cli initiative_daemon` (off by default).
 - Watchers: file idle, git idle, and timer. Default trigger mode requires both idle and timer.
 - Multi-repo: configure `initiative.watch_targets` inline or point `initiative.watch_config_path` to `configs/watch_targets.yaml` for per-repo triggers, idle timers, and `verify_rollback` flags.
@@ -41,7 +41,7 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
 - **Graph workflows (experimental)** – Describe branching workflows in YAML (e.g., `configs/graphs/quick_fix.yaml`) and run them with `python -m symbiont.cli run_graph configs/graphs/quick_fix.yaml "Fix lint"`. If a run pauses, resume via `python -m symbiont.cli graph_resume data/evolution/graph_state_<ts>.json`. Use `graph.parallel` groups to force sequential cohorts (every node in the array runs once before advancing, but any failure or block exits early to whatever `on_failure`/`on_block` targets you set). When an agent emits a handoff, capture the follow-up work in SQLite and unblock the graph with `python -m symbiont.cli graph-handoff-complete <state.json> --outcome success --result '{"verdict": "ok"}'` once the human task is finished.
 - **Handoff notifications** – Optionally add `notifications.handoff_webhook_url=https://...` in `configs/config.yaml` to receive immediate POST callbacks whenever a graph blocks on human input. Lock down outbound hooks with `notifications.allow_domains` so Slack/PagerDuty integrations stay allowlisted.
 
-## New Utilities (v3.5)
+## New Utilities (v3.6)
 - Guarded actions: UI and CLI confirmations for script writes and runs; actions recorded in `audits`.
 - Reflection + mutation: each cycle feeds `data/evolution/state.json`; `sym evolve_self --scope planner` queues guarded prompt tweaks (≤5% diff) saved under `data/artifacts/mutations/` after triple sandbox validation.
 - Swarm evolution: enable `evolution.swarm_enabled=true` to spawn parallel belief variants, score via peer chats, and merge consensus claims (`sym swarm_evolve "belief: UI->prefers->dark_mode"`).
@@ -64,7 +64,11 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
 - **Security helpers**: `sym rotate_credential ENV_KEY NEW_VALUE --env-file .env` rotates credentials with `audit_logs` tracking, and transcripts/notes now auto-redact emails, phone numbers, and obvious secrets.
 - **Graph & crew templates**: reusable starters live under `configs/templates/graph_template.yaml` and `configs/templates/crew_template.yaml`, validated via new Pydantic schemas.
 - MCP server (minimal) + CLI `install-hooks` for RAG automation.
-- **Foresight async hunts (v3.5)**: `python scripts/demo_async_foresight.py "emergent agentic trends"` blends arXiv, RSS, and optional Grok/Devin peer pings (rate-limited with jitter). Configure collaborators under `foresight.collaboration` in `configs/config.yaml`; enable the meta-foresight crew to trigger guardrail reviews automatically when relevance scores exceed the configured threshold. RLHF rewards are scrubbed and logged to `data/artifacts/rlhf/`, and you can inspect aggregates programmatically via `Orchestrator.train_from_rewards()`.
+- **Memory layers (experimental)**: configure `memory.layer` in `configs/config.yaml` or pass `--memory-layer` to `sym rag_*` commands to toggle `local`, `mem0`, or `letta` backends (stubs gracefully fall back to local when optional SDKs are absent).
+- Remote memory setup:
+  - Mem0: export `MEM0_API_KEY` (and optional `MEM0_API_HOST`, `MEM0_ORG_ID`, `MEM0_PROJECT_ID`) to sync `remember_preferences`/`recall_preferences` through the Mem0 API; set `MEM0_USER_ID`/`MEM0_SESSION_USER` (or override in `memory.mem0`) to pin remote user scopes.
+  - Letta: export `LETTA_API_TOKEN`/`LETTA_TOKEN` plus `LETTA_PROJECT` (and optional `LETTA_BASE_URL`) to persist session state + preference blocks via Letta's Blocks API. Labels + env overrides are configurable under `memory.letta` in `configs/config.yaml`.
+- **Foresight async hunts (v3.6)**: `python scripts/demo_async_foresight.py "emergent agentic trends"` blends arXiv, RSS, and optional Grok/Devin peer pings (rate-limited with jitter). Configure collaborators under `foresight.collaboration` in `configs/config.yaml`; enable the meta-foresight crew to trigger guardrail reviews automatically when relevance scores exceed the configured threshold. RLHF rewards are scrubbed and logged to `data/artifacts/rlhf/`, and you can inspect aggregates programmatically via `Orchestrator.train_from_rewards()`.
 
 ## Foresight Engine
 
