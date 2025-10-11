@@ -162,7 +162,7 @@ def _build_budget_chart(rows: list[dict[str, Any]]) -> dict[str, list[float]]:
 
 
 def render_home(cfg: dict, db: MemoryDB):
-    st.title("🧠 Cognitive Symbiont — Homebase (v2.4)")
+    st.title("🧠 Cognitive Symbiont — Homebase (v3.6)")
     st.autorefresh(interval=15000, key="home_autorefresh")
     st.markdown(
         "Welcome! Symbiont drafts small, reviewable changes for you. **You stay in control**—every script pauses for approval and every step is logged so you can undo it later."
