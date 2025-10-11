@@ -4,8 +4,13 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from rich import print as rprint
 from .memory.db import MemoryDB
-from .memory import retrieval
-from .memory import graphrag
+from .memory import (
+    retrieval,
+    graphrag,
+    coerce_backend_name,
+    resolve_backend,
+    MemoryBackendError,
+)
 from .agents.subself import SubSelf
 from .llm.budget import TokenBudget
 from .agents.reflector import CycleReflector
@@ -19,6 +24,16 @@ class Orchestrator:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.db = MemoryDB(db_path=config["db_path"])
+        backend_name = coerce_backend_name(config)
+        memory_cfg = config.get("memory") if isinstance(config.get("memory"), dict) else {}
+        try:
+            backend = resolve_backend(backend_name, self.db, config=memory_cfg)
+        except MemoryBackendError as exc:
+            rprint(f"[yellow]Memory backend '{backend_name}' unavailable:[/yellow] {exc}. Falling back to local.")
+            backend = resolve_backend("local", self.db, config=memory_cfg)
+        self.memory_backend = backend
+        self.memory_backend_name = backend.name
+        os.environ["SYMBIONT_MEMORY_LAYER"] = self.memory_backend_name
         with open(os.path.join(os.path.dirname(__file__),'roles','roles.yaml'),'r',encoding='utf-8') as f:
             import yaml; self.roles = yaml.safe_load(f).get('roles', [])
         ensure_dirs([os.path.dirname(config['db_path'] or './data/symbiont.db')])
@@ -39,10 +54,11 @@ class Orchestrator:
 
     def cycle(self, goal: str) -> Dict[str, Any]:
         self.db.ensure_schema()
-        retrieval.build_indices(self.db, limit_if_new=256)
+        self.memory_backend.build_indices(limit_if_new=256)
         external_context = self._maybe_fetch_external(goal)
         eid = self.db.start_episode(title=f"Goal: {goal}")
         ctx = {"goal": goal, "episode_id": eid, "cwd": os.getcwd()}
+        ctx["memory_backend_name"] = self.memory_backend_name
         if external_context:
             ctx["external_context"] = external_context
         limit = 0
@@ -211,8 +227,7 @@ class Orchestrator:
         min_relevance = float(ext_cfg.get("min_relevance", 0.7))
         log_enabled = bool(ext_cfg.get("log", True))
         try:
-            result = retrieval.fetch_external_context(
-                self.db,
+            result = self.memory_backend.fetch_external_context(
                 goal,
                 max_items=max_items,
                 min_relevance=min_relevance,

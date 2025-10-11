@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,7 +25,11 @@ from ..agents.registry import AgentRegistry
 from ..agents.subself import SubSelf
 from ..llm.budget import TokenBudget
 from ..memory.db import MemoryDB
-from ..memory import retrieval
+from ..memory import (
+    coerce_backend_name,
+    resolve_backend,
+    MemoryBackendError,
+)
 from ..tools import scriptify, sd_engine
 from .schema import GraphFileModel
 from .systems import governance_snapshot
@@ -138,6 +143,16 @@ class GraphRunner:
         self.registry = registry
         self.cfg = cfg
         self.db = db
+        backend_name = coerce_backend_name(cfg)
+        memory_cfg = cfg.get("memory") if isinstance(cfg.get("memory"), dict) else {}
+        try:
+            backend = resolve_backend(backend_name, db, config=memory_cfg)
+        except MemoryBackendError as exc:
+            logger.warning("GraphRunner memory backend '%s' unavailable: %s; falling back to local.", backend_name, exc)
+            backend = resolve_backend("local", db, config=memory_cfg)
+        self.memory_backend = backend
+        self.memory_backend_name = backend.name
+        os.environ["SYMBIONT_MEMORY_LAYER"] = self.memory_backend_name
         self.graph_path = graph_path
         self.state_dir = state_dir
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -554,8 +569,7 @@ class GraphRunner:
         min_relevance = float(ext_cfg.get("min_relevance", 0.7))
         log_enabled = bool(ext_cfg.get("log", True))
         try:
-            result = retrieval.fetch_external_context(
-                self.db,
+            result = self.memory_backend.fetch_external_context(
                 goal,
                 max_items=max_items,
                 min_relevance=min_relevance,

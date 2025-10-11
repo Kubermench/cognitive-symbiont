@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any, List
 from rich import print as rprint
 from .orchestrator import Orchestrator
 from .memory.db import MemoryDB
-from .memory import retrieval
+from .memory import retrieval, coerce_backend_name, available_backends
 from .memory.external_sources import list_cache_entries, clear_cache
 from .tools import repo_scan, scriptify
 from .llm.client import LLMClient
@@ -43,6 +43,18 @@ app = typer.Typer(help="Cognitive Symbiont — MVP CLI v2.3")
 
 def load_config(path: str = "./configs/config.yaml"):
     with open(path,"r",encoding="utf-8") as f: return yaml.safe_load(f)
+
+
+MEMORY_LAYER_HELP = f"Memory backend to use ({', '.join(available_backends())}). Defaults to config/env."
+
+
+def _memory_layer(cfg: Dict[str, Any], override: Optional[str] = None) -> Optional[str]:
+    return coerce_backend_name(cfg, override=override)
+
+
+def _memory_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    section = cfg.get("memory")
+    return section if isinstance(section, dict) else {}
 
 def _label_shadow(
     cfg: Dict[str, Any],
@@ -155,9 +167,17 @@ def init(config_path: str = "./configs/config.yaml"):
     rprint(f"[green]DB initialized at[/green] {cfg['db_path']}")
 
 @app.command()
-def rag_reindex(config_path: str = "./configs/config.yaml"):
-    cfg=load_config(config_path); db=MemoryDB(db_path=cfg["db_path"]); db.ensure_schema()
-    n=retrieval.build_indices(db); rprint(f"[green]Indexed[/green] {n} items.")
+def rag_reindex(
+    config_path: str = "./configs/config.yaml",
+    memory_layer: Optional[str] = typer.Option(None, "--memory-layer", help=MEMORY_LAYER_HELP),
+):
+    cfg = load_config(config_path)
+    db = MemoryDB(db_path=cfg["db_path"])
+    db.ensure_schema()
+    backend = _memory_layer(cfg, override=memory_layer)
+    mem_cfg = _memory_config(cfg)
+    n = retrieval.build_indices(db, backend=backend, config=mem_cfg)
+    rprint(f"[green]Indexed[/green] {n} items.")
 
 
 @app.command()
@@ -190,10 +210,19 @@ exit 0
         rprint(f"[green]Installed pre-push hook at[/green] {hook_path}")
 
 @app.command()
-def rag_search(query: str, k: int = 5, config_path: str = "./configs/config.yaml"):
-    cfg=load_config(config_path); db=MemoryDB(db_path=cfg["db_path"])
-    res=retrieval.search(db, query, k=k)
-    for r in res: rprint(f"[cyan]{r['kind']}[/cyan] {r['ref_table']}#{r['ref_id']} score={r['score']:.3f}\n{r['preview']}")
+def rag_search(
+    query: str,
+    k: int = 5,
+    config_path: str = "./configs/config.yaml",
+    memory_layer: Optional[str] = typer.Option(None, "--memory-layer", help=MEMORY_LAYER_HELP),
+):
+    cfg = load_config(config_path)
+    db = MemoryDB(db_path=cfg["db_path"])
+    backend = _memory_layer(cfg, override=memory_layer)
+    mem_cfg = _memory_config(cfg)
+    res = retrieval.search(db, query, k=k, backend=backend, config=mem_cfg)
+    for r in res:
+        rprint(f"[cyan]{r['kind']}[/cyan] {r['ref_table']}#{r['ref_id']} score={r['score']:.3f}\n{r['preview']}")
 
 
 @app.command()
@@ -202,6 +231,7 @@ def rag_fetch_external(
     max_items: int = typer.Option(6, "--max-items", "-m", help="Maximum external items to consider"),
     min_relevance: float = typer.Option(0.7, "--min-relevance", "-r", help="Minimum relevance (0-1) required"),
     config_path: str = "./configs/config.yaml",
+    memory_layer: Optional[str] = typer.Option(None, "--memory-layer", help=MEMORY_LAYER_HELP),
 ):
     """
     Pull external research context (arXiv + Semantic Scholar) and merge high-confidence triples into GraphRAG.
@@ -209,11 +239,15 @@ def rag_fetch_external(
     cfg = load_config(config_path)
     db = MemoryDB(db_path=cfg["db_path"])
     db.ensure_schema()
+    backend = _memory_layer(cfg, override=memory_layer)
+    mem_cfg = _memory_config(cfg)
     result = retrieval.fetch_external_context(
         db,
         query,
         max_items=max_items,
         min_relevance=min_relevance,
+        backend=backend,
+        config=mem_cfg,
     )
     accepted = result.get("accepted") or []
     claims = result.get("claims") or []
@@ -517,10 +551,12 @@ def shadow_label(
         db = MemoryDB(db_path=cfg["db_path"])
         db.ensure_schema()
         db.add_artifact(task_id=None, kind="shadow_labels", path=str(out_path), summary=summary_line)
-        retrieval.build_indices(db, limit_if_new=64)
+        backend = _memory_layer(cfg)
+        mem_cfg = _memory_config(cfg)
+        retrieval.build_indices(db, limit_if_new=64, backend=backend, config=mem_cfg)
         if ingest:
             digest = ingest_labels(db, summary=labeled, source_path=out_path, top=ingest_top)
-            retrieval.build_indices(db, limit_if_new=64)
+            retrieval.build_indices(db, limit_if_new=64, backend=backend, config=mem_cfg)
             top_labels = ", ".join(f"{label}={count}" for label, count in digest["top"]) or "(none)"
             rprint(f"[green]Ingested labels:[/green] {top_labels}")
     except Exception as exc:  # pragma: no cover - best effort
@@ -555,7 +591,9 @@ def shadow_ingest(
     db = MemoryDB(db_path=cfg["db_path"])
     db.ensure_schema()
     digest = ingest_labels(db, summary=labeled, source_path=label_path, top=top)
-    retrieval.build_indices(db, limit_if_new=64)
+    backend = _memory_layer(cfg)
+    mem_cfg = _memory_config(cfg)
+    retrieval.build_indices(db, limit_if_new=64, backend=backend, config=mem_cfg)
 
     top_labels = ", ".join(f"{label}={count}" for label, count in digest["top"]) or "(none)"
     rprint(f"[green]Ingested shadow labels[/green] source={label_path}")
@@ -702,9 +740,11 @@ def shadow_batch(
         db = MemoryDB(db_path=cfg["db_path"])
         db.ensure_schema()
         db.add_artifact(task_id=None, kind="shadow_labels", path=str(label_path), summary=summary_line)
-        retrieval.build_indices(db, limit_if_new=64)
+        backend = _memory_layer(cfg)
+        mem_cfg = _memory_config(cfg)
+        retrieval.build_indices(db, limit_if_new=64, backend=backend, config=mem_cfg)
         digest = ingest_labels(db, summary=labeled, source_path=label_path, top=ingest_top)
-        retrieval.build_indices(db, limit_if_new=64)
+        retrieval.build_indices(db, limit_if_new=64, backend=backend, config=mem_cfg)
         top_ingested = ", ".join(f"{label}={count}" for label, count in digest["top"]) or "(none)"
         rprint(f"[green]Ingested labels:[/green] {top_ingested}")
     except Exception as exc:  # pragma: no cover - best effort

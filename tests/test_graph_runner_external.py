@@ -8,7 +8,6 @@ import pytest
 from symbiont.agents.registry import AgentRegistry, AgentSpec, CrewSpec
 from symbiont.memory.db import MemoryDB
 from symbiont.orchestration.graph import GraphRunner, GraphSpec, NodeSpec
-from symbiont.memory import retrieval as retrieval_module
 
 
 def _minimal_registry() -> AgentRegistry:
@@ -34,20 +33,19 @@ def _build_runner(tmp_path: Path, cfg: Dict[str, Any]) -> GraphRunner:
 
 def test_graph_runner_fetches_external_when_enabled(monkeypatch, tmp_path: Path):
     captured: Dict[str, Any] = {}
-
-    def fake_fetch(db, query, *, max_items, min_relevance, fetcher=None):
-        captured["query"] = query
-        captured["max_items"] = max_items
-        captured["min_relevance"] = min_relevance
-        return {"accepted": [{"title": "Agentic"}], "claims": [{"id": 1}]}
-
-    monkeypatch.setattr(retrieval_module, "fetch_external_context", fake_fetch)
-
     cfg = {
         "db_path": str(tmp_path / "symbiont.db"),
         "retrieval": {"external": {"enabled": True, "max_items": 4, "min_relevance": 0.6, "log": False}},
     }
     runner = _build_runner(tmp_path, cfg)
+
+    def fake_fetch(query, *, max_items, min_relevance, fetcher=None):
+        captured["query"] = query
+        captured["max_items"] = max_items
+        captured["min_relevance"] = min_relevance
+        return {"accepted": [{"title": "Agentic"}], "claims": [{"id": 1}]}
+
+    monkeypatch.setattr(runner.memory_backend, "fetch_external_context", fake_fetch)
 
     result = runner._maybe_fetch_external("agentic graph work")
 
@@ -61,10 +59,9 @@ def test_graph_runner_skips_external_when_disabled(monkeypatch, tmp_path: Path):
     def fail_fetch(*args, **kwargs):
         raise AssertionError("fetch_external_context should not be called when disabled")
 
-    monkeypatch.setattr(retrieval_module, "fetch_external_context", fail_fetch)
-
     cfg = {"db_path": str(tmp_path / "symbiont.db"), "retrieval": {"external": {"enabled": False}}}
     runner = _build_runner(tmp_path, cfg)
+    monkeypatch.setattr(runner.memory_backend, "fetch_external_context", fail_fetch)
 
     result = runner._maybe_fetch_external("skip me")
 

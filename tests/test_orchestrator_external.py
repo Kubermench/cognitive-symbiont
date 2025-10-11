@@ -6,7 +6,6 @@ from typing import Dict, Any
 import pytest
 
 from symbiont.orchestrator import Orchestrator
-from symbiont.memory import retrieval as retrieval_module
 from symbiont.agents import reflector as reflector_module
 
 
@@ -37,18 +36,17 @@ def _base_config(tmp_path: Path) -> Dict[str, Any]:
 
 def test_auto_external_fetch_enabled(monkeypatch, tmp_path):
     captured: Dict[str, Any] = {}
+    cfg = _base_config(tmp_path)
+    cfg["retrieval"] = {"external": {"enabled": True, "max_items": 3, "min_relevance": 0.55, "log": False}}
+    orch = Orchestrator(cfg)
 
-    def fake_fetch(db, query, *, max_items, min_relevance, fetcher=None):
+    def fake_fetch(query, *, max_items, min_relevance, fetcher=None):
         captured["query"] = query
         captured["max_items"] = max_items
         captured["min_relevance"] = min_relevance
         return {"accepted": [{"title": "Agentic"}], "claims": [{"id": 1}]}
 
-    monkeypatch.setattr(retrieval_module, "fetch_external_context", fake_fetch)
-
-    cfg = _base_config(tmp_path)
-    cfg["retrieval"] = {"external": {"enabled": True, "max_items": 3, "min_relevance": 0.55, "log": False}}
-    orch = Orchestrator(cfg)
+    monkeypatch.setattr(orch.memory_backend, "fetch_external_context", fake_fetch)
 
     result = orch._maybe_fetch_external("agentic AI")
 
@@ -62,11 +60,10 @@ def test_auto_external_fetch_disabled(monkeypatch, tmp_path):
     def fail_fetch(*args, **kwargs):
         raise AssertionError("fetch_external_context should not be invoked when disabled")
 
-    monkeypatch.setattr(retrieval_module, "fetch_external_context", fail_fetch)
-
     cfg = _base_config(tmp_path)
     cfg["retrieval"] = {"external": {"enabled": False}}
     orch = Orchestrator(cfg)
+    monkeypatch.setattr(orch.memory_backend, "fetch_external_context", fail_fetch)
 
     result = orch._maybe_fetch_external("agentic AI")
 

@@ -1,6 +1,22 @@
 db_path: ./data/symbiont.db
 env: dev
 max_tokens: 6000
+memory:
+  layer: local  # local | mem0 | letta
+  mem0:
+    api_key_env: MEM0_API_KEY
+    host: null
+    org_id: null
+    project_id: null
+    preferences_user_id_env: MEM0_USER_ID
+    session_user_id_env: MEM0_SESSION_USER
+  letta:
+    token_env: LETTA_API_TOKEN  # or LETTA_TOKEN
+    project: null
+    base_url: null
+    session_label: symbiont_session_state
+    preference_label: symbiont_user_preferences
+    user_id_env: LETTA_USER_ID
 cycle_budget_seconds: 60
 consensus:
   min_agree: 2
