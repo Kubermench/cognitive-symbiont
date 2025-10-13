@@ -22,6 +22,8 @@ from .ports.oracle import QueryOracle
 from .ports.ai_peer import AIPeerBridge
 from .ports.github import GitHubGuard
 from .observability.metrics import serve_metrics as start_metrics_server
+from .observability.metrics_collector import collect_and_export_metrics
+from .observability.budget_monitor import BudgetMonitor, create_budget_alerts_config
 from .tools.security import rotate_env_secret
 from .tools.systems_os import update_flow_metrics
 from .initiative.watchers import WatchEvent, build_repo_watch_configs  # noqa: F401 (placeholder for future use)
@@ -1531,6 +1533,220 @@ def metrics(
         raise typer.BadParameter(f"Config not found: {cfg_path}")
     rprint(f"[green]Serving metrics on port {port} (interval {interval}s). Press Ctrl+C to stop.")
     start_metrics_server(str(cfg_path), port=port, interval=interval)
+
+
+@app.command()
+def dashboard(
+    config_path: str = "./configs/config.yaml",
+    port: int = typer.Option(8501, "--port", help="Port for Streamlit dashboard"),
+    data_root: str = typer.Option(None, "--data-root", help="Override data root path"),
+):
+    """Launch the Symbiont observability dashboard."""
+    
+    cfg_path = Path(config_path).expanduser()
+    if not cfg_path.exists():
+        rprint(f"[yellow]Warning: Config not found at {cfg_path}, using defaults")
+    
+    try:
+        import streamlit.web.cli as stcli
+        import sys
+        
+        # Set up streamlit arguments
+        dashboard_script = Path(__file__).parent / "observability" / "dashboard.py"
+        
+        sys.argv = [
+            "streamlit",
+            "run",
+            str(dashboard_script),
+            "--server.port", str(port),
+            "--server.headless", "true",
+            "--browser.gatherUsageStats", "false",
+        ]
+        
+        if data_root:
+            os.environ["SYMBIONT_DATA_ROOT"] = data_root
+        if cfg_path.exists():
+            os.environ["SYMBIONT_CONFIG_PATH"] = str(cfg_path)
+        
+        rprint(f"[green]Launching Symbiont dashboard on port {port}")
+        rprint(f"[blue]Visit: http://localhost:{port}")
+        
+        stcli.main()
+        
+    except ImportError:
+        rprint("[red]Streamlit not installed. Install with: pip install streamlit plotly")
+        raise typer.Exit(1)
+    except Exception as exc:
+        rprint(f"[red]Failed to launch dashboard: {exc}")
+        raise typer.Exit(1)
+
+
+@app.command()
+def collect_metrics(
+    config_path: str = "./configs/config.yaml",
+    data_root: str = typer.Option(None, "--data-root", help="Override data root path"),
+    export_file: str = typer.Option(None, "--export", help="Export metrics to JSON file"),
+    format_output: str = typer.Option("json", "--format", help="Output format (json|summary)"),
+):
+    """Collect and display current Symbiont metrics."""
+    
+    cfg = load_config(config_path) if Path(config_path).exists() else {}
+    data_root_path = Path(data_root) if data_root else Path(cfg.get("data_root", "data"))
+    
+    export_path = Path(export_file) if export_file else None
+    
+    try:
+        metrics_data = collect_and_export_metrics(
+            data_root=data_root_path,
+            config=cfg,
+            export_path=export_path,
+        )
+        
+        if format_output == "summary":
+            # Display human-readable summary
+            rprint("[bold green]📊 Symbiont Metrics Summary[/bold green]")
+            rprint(f"Collected at: {datetime.fromtimestamp(metrics_data['timestamp']).strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # Budget summary
+            budget_data = metrics_data.get("budget", {})
+            snapshots = budget_data.get("snapshots", {})
+            
+            if snapshots:
+                rprint(f"\n[bold]💰 Token Budgets ({len(snapshots)} active)[/bold]")
+                for label, snapshot in snapshots.items():
+                    used = snapshot.get("used", 0)
+                    limit = snapshot.get("limit", 0)
+                    
+                    if limit > 0:
+                        usage_pct = (used / limit) * 100
+                        rprint(f"  • {label}: {used:,}/{limit:,} tokens ({usage_pct:.1f}%)")
+                    else:
+                        rprint(f"  • {label}: {used:,} tokens (unlimited)")
+            
+            # Circuit breaker summary
+            cb_data = metrics_data.get("circuit_breakers", {})
+            if cb_data:
+                rprint(f"\n[bold]⚡ Circuit Breakers ({len(cb_data)} total)[/bold]")
+                for name, cb_metrics in cb_data.items():
+                    state = cb_metrics.get("state", "unknown")
+                    success_rate = cb_metrics.get("success_rate", 0) * 100
+                    
+                    state_emoji = {"closed": "🟢", "half_open": "🟡", "open": "🔴"}.get(state, "❓")
+                    rprint(f"  • {name}: {state_emoji} {state} ({success_rate:.1f}% success)")
+            
+            # Daemon summary
+            daemon_data = metrics_data.get("daemon", {})
+            if daemon_data:
+                running = daemon_data.get("daemon_running", False)
+                node_id = daemon_data.get("node_id", "unknown")
+                status_emoji = "🟢" if running else "🔴"
+                
+                rprint(f"\n[bold]🤖 Daemon Status[/bold]")
+                rprint(f"  • Node: {node_id}")
+                rprint(f"  • Status: {status_emoji} {'Running' if running else 'Stopped'}")
+                
+                if running:
+                    uptime_ts = daemon_data.get("daemon_started_ts", 0)
+                    if uptime_ts > 0:
+                        uptime = datetime.now() - datetime.fromtimestamp(uptime_ts)
+                        rprint(f"  • Uptime: {uptime}")
+            
+            # System summary
+            system_data = metrics_data.get("system", {})
+            if system_data and system_data.get("psutil_available", True):
+                rprint(f"\n[bold]💻 System Resources[/bold]")
+                
+                cpu_pct = system_data.get("cpu_percent", 0)
+                memory_pct = system_data.get("memory_percent", 0)
+                disk_pct = system_data.get("disk_percent", 0)
+                
+                rprint(f"  • CPU: {cpu_pct:.1f}%")
+                rprint(f"  • Memory: {memory_pct:.1f}%")
+                rprint(f"  • Disk: {disk_pct:.1f}%")
+        
+        else:
+            # JSON output
+            rprint(json.dumps(metrics_data, indent=2))
+        
+        if export_file:
+            rprint(f"\n[green]Metrics exported to: {export_file}[/green]")
+        
+    except Exception as exc:
+        rprint(f"[red]Failed to collect metrics: {exc}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def budget_monitor(
+    config_path: str = "./configs/config.yaml",
+    data_root: str = typer.Option(None, "--data-root", help="Override data root path"),
+    interval: int = typer.Option(60, "--interval", help="Monitoring interval in seconds"),
+    warning_threshold: float = typer.Option(75.0, "--warning", help="Warning threshold percentage"),
+    error_threshold: float = typer.Option(90.0, "--error", help="Error threshold percentage"),
+    report_file: str = typer.Option(None, "--report", help="Save report to file"),
+):
+    """Run budget monitoring with alerts and trend analysis."""
+    
+    cfg = load_config(config_path) if Path(config_path).exists() else {}
+    data_root_path = Path(data_root) if data_root else Path(cfg.get("data_root", "data"))
+    
+    # Create monitoring configuration
+    monitor_config = create_budget_alerts_config(
+        warning_pct=warning_threshold,
+        error_pct=error_threshold,
+        critical_pct=95.0,
+    )
+    
+    monitor = BudgetMonitor(data_root_path, monitor_config)
+    
+    try:
+        rprint(f"[green]Starting budget monitoring (interval: {interval}s)[/green]")
+        rprint(f"Alert thresholds: {warning_threshold}% warning, {error_threshold}% error")
+        rprint("Press Ctrl+C to stop...")
+        
+        while True:
+            start_time = time.time()
+            
+            result = monitor.run_monitoring_cycle()
+            
+            if result["status"] == "success":
+                summary = result["summary"]
+                alerts_count = result["alerts_count"]
+                trends_count = result["trends_count"]
+                
+                rprint(f"[dim]Monitoring cycle: {result['budgets_count']} budgets, {alerts_count} alerts, {trends_count} trends[/dim]")
+                
+                # Display active alerts
+                if alerts_count > 0:
+                    alerts = summary["alerts"]["details"]
+                    for alert in alerts:
+                        severity_color = {
+                            "warning": "yellow",
+                            "error": "red",
+                            "critical": "bold red",
+                        }.get(alert["severity"], "white")
+                        
+                        rprint(f"[{severity_color}]🚨 {alert['severity'].upper()}: {alert['message']}[/{severity_color}]")
+                
+                # Save report if requested
+                if report_file:
+                    report_path = monitor.save_report(summary)
+                    rprint(f"[blue]Report saved: {report_path}[/blue]")
+            else:
+                rprint(f"[red]Monitoring cycle failed: {result.get('error')}[/red]")
+            
+            # Sleep for remaining interval
+            elapsed = time.time() - start_time
+            sleep_time = max(0, interval - elapsed)
+            
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+                
+    except KeyboardInterrupt:
+        rprint("\n[yellow]Budget monitoring stopped by user[/yellow]")
+    except Exception as exc:
+        rprint(f"[red]Budget monitoring failed: {exc}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command()

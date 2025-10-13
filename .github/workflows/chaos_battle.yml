@@ -1,0 +1,450 @@
+name: Chaos Battle Testing
+
+on:
+  schedule:
+    # Run chaos tests weekly on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'Duration of battle test in minutes'
+        required: false
+        default: '10'
+        type: string
+      chaos_intensity:
+        description: 'Chaos intensity (low/medium/high)'
+        required: false
+        default: 'medium'
+        type: choice
+        options:
+          - low
+          - medium
+          - high
+  pull_request:
+    paths:
+      - 'symbiont/**'
+      - 'tests/test_chaos_adversarial.py'
+      - '.github/workflows/chaos_battle.yml'
+
+jobs:
+  chaos-testing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+        chaos-scenario:
+          - 'llm_outages'
+          - 'network_failures'
+          - 'database_corruption'
+          - 'prompt_injection'
+          - 'resource_exhaustion'
+          - 'full_battle'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install pytest pytest-timeout pytest-xdist
+      
+      - name: Set chaos parameters
+        id: chaos-params
+        run: |
+          # Set duration based on input or default
+          DURATION="${{ github.event.inputs.duration_minutes || '5' }}"
+          
+          # Set chaos intensity
+          INTENSITY="${{ github.event.inputs.chaos_intensity || 'medium' }}"
+          
+          case $INTENSITY in
+            low)
+              FAILURE_RATE="0.2"
+              TIMEOUT_RATE="0.1"
+              ;;
+            medium)
+              FAILURE_RATE="0.4"
+              TIMEOUT_RATE="0.2"
+              ;;
+            high)
+              FAILURE_RATE="0.7"
+              TIMEOUT_RATE="0.3"
+              ;;
+          esac
+          
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+          echo "failure_rate=$FAILURE_RATE" >> $GITHUB_OUTPUT
+          echo "timeout_rate=$TIMEOUT_RATE" >> $GITHUB_OUTPUT
+          echo "intensity=$INTENSITY" >> $GITHUB_OUTPUT
+      
+      - name: Run LLM Outage Tests
+        if: matrix.chaos-scenario == 'llm_outages'
+        timeout-minutes: 10
+        run: |
+          python -m pytest tests/test_chaos_adversarial.py::TestLLMChaos -v \
+            --tb=short \
+            --timeout=300 \
+            -x
+      
+      - name: Run Network Failure Tests
+        if: matrix.chaos-scenario == 'network_failures'
+        timeout-minutes: 10
+        run: |
+          python -m pytest tests/test_chaos_adversarial.py::TestWebhookChaos -v \
+            --tb=short \
+            --timeout=300 \
+            -x
+      
+      - name: Run Database Corruption Tests
+        if: matrix.chaos-scenario == 'database_corruption'
+        timeout-minutes: 10
+        run: |
+          python -m pytest tests/test_chaos_adversarial.py::TestDatabaseChaos -v \
+            --tb=short \
+            --timeout=300 \
+            -x
+      
+      - name: Run Prompt Injection Tests
+        if: matrix.chaos-scenario == 'prompt_injection'
+        timeout-minutes: 10
+        run: |
+          python -m pytest tests/test_chaos_adversarial.py::TestPromptInjectionResilience -v \
+            --tb=short \
+            --timeout=300 \
+            -x
+      
+      - name: Run Resource Exhaustion Tests
+        if: matrix.chaos-scenario == 'resource_exhaustion'
+        timeout-minutes: 10
+        run: |
+          python -m pytest tests/test_chaos_adversarial.py::TestResourceExhaustionResilience -v \
+            --tb=short \
+            --timeout=300 \
+            -x
+      
+      - name: Run Full Battle Test
+        if: matrix.chaos-scenario == 'full_battle'
+        timeout-minutes: 20
+        env:
+          CHAOS_DURATION: ${{ steps.chaos-params.outputs.duration }}
+          CHAOS_INTENSITY: ${{ steps.chaos-params.outputs.intensity }}
+        run: |
+          echo "🔥 Running full battle test for $CHAOS_DURATION minutes at $CHAOS_INTENSITY intensity"
+          python -c "
+          import sys
+          sys.path.insert(0, '.')
+          from tests.test_chaos_adversarial import run_chaos_battle_test
+          import os
+          
+          duration = int(os.environ.get('CHAOS_DURATION', '5'))
+          results = run_chaos_battle_test(duration_minutes=duration)
+          
+          print(f'Battle test results: {results}')
+          
+          # Fail if success rate is too low
+          if results['success_rate'] < 0.1:
+              print(f'❌ Battle test failed: success rate {results[\"success_rate\"]:.1%} too low')
+              sys.exit(1)
+          else:
+              print(f'✅ Battle test passed: success rate {results[\"success_rate\"]:.1%}')
+          "
+      
+      - name: Run Configuration Tampering Tests
+        timeout-minutes: 5
+        run: |
+          python -m pytest tests/test_chaos_adversarial.py::TestConfigurationTampering -v \
+            --tb=short \
+            --timeout=180 \
+            -x
+      
+      - name: Collect chaos metrics
+        if: always()
+        run: |
+          echo "## Chaos Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **Scenario**: ${{ matrix.chaos-scenario }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Python Version**: ${{ matrix.python-version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Chaos Intensity**: ${{ steps.chaos-params.outputs.intensity }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Duration**: ${{ steps.chaos-params.outputs.duration }} minutes" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          
+          # Check for any core dumps or crash files
+          if ls core.* 2>/dev/null || ls crash_* 2>/dev/null; then
+            echo "⚠️ **Crash files detected**" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Check system resources
+          echo "### System Resources" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          free -h >> $GITHUB_STEP_SUMMARY
+          df -h >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Upload chaos test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-test-results-${{ matrix.python-version }}-${{ matrix.chaos-scenario }}
+          path: |
+            data/
+            *.log
+            core.*
+            crash_*
+          retention-days: 7
+          if-no-files-found: ignore
+
+  adversarial-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install pytest pytest-timeout
+      
+      - name: Run security fuzzing tests
+        timeout-minutes: 10
+        run: |
+          python -m pytest tests/test_property_fuzz_components.py::TestSecurityFuzzing -v \
+            --tb=short \
+            --timeout=300 \
+            -x
+      
+      - name: Run PII detection stress test
+        timeout-minutes: 5
+        run: |
+          python -c "
+          import sys
+          sys.path.insert(0, '.')
+          from symbiont.tools.security import detect_pii_patterns, scrub_text
+          import random
+          import string
+          
+          print('🔍 Running PII detection stress test...')
+          
+          # Generate random text with embedded PII
+          test_cases = []
+          for i in range(1000):
+              # Generate random text with potential PII
+              text = ''.join(random.choices(string.ascii_letters + string.digits + ' @.-', k=random.randint(10, 200)))
+              
+              # Sometimes inject real PII patterns
+              if random.random() < 0.1:
+                  text += f' Contact: user{i}@test.com'
+              if random.random() < 0.1:
+                  text += f' Phone: 555-{random.randint(1000, 9999)}'
+              
+              test_cases.append(text)
+          
+          # Test all cases
+          processed = 0
+          errors = 0
+          
+          for text in test_cases:
+              try:
+                  detections = detect_pii_patterns(text)
+                  scrubbed = scrub_text(text)
+                  processed += 1
+              except Exception as e:
+                  errors += 1
+                  print(f'Error processing text: {e}')
+          
+          print(f'✅ Processed {processed}/{len(test_cases)} cases, {errors} errors')
+          
+          if errors > len(test_cases) * 0.01:  # Allow 1% error rate
+              print(f'❌ Too many errors: {errors}')
+              sys.exit(1)
+          "
+
+  eternal-mode-simulation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: github.event_name == 'schedule' || github.event.inputs.duration_minutes
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      
+      - name: Simulate eternal mode under chaos
+        timeout-minutes: 20
+        run: |
+          python -c "
+          import sys
+          import time
+          import threading
+          import random
+          from unittest.mock import patch, Mock
+          
+          sys.path.insert(0, '.')
+          from tests.test_chaos_adversarial import ChaosTestFramework
+          from symbiont.initiative.daemon import run_once_if_triggered
+          
+          print('🔄 Simulating eternal mode under chaos conditions...')
+          
+          chaos = ChaosTestFramework()
+          
+          try:
+              # Inject moderate chaos
+              chaos.inject_llm_chaos(failure_rate=0.3, timeout_rate=0.1)
+              chaos.inject_database_chaos(corruption_rate=0.1)
+              
+              # Mock configuration
+              config = {
+                  'initiative': {
+                      'enabled': True,
+                      'goal_template': 'Test eternal mode goal',
+                      'retry': {
+                          'attempts': 3,
+                          'base_delay': 0.1,
+                          'backoff': 2.0,
+                      }
+                  },
+                  'db_path': ':memory:',
+                  'llm': {
+                      'provider': 'cmd',
+                      'cmd': 'echo test response'
+                  }
+              }
+              
+              cycles = 0
+              successes = 0
+              start_time = time.time()
+              
+              # Run for 10 minutes or until we hit issues
+              while time.time() - start_time < 600:  # 10 minutes
+                  try:
+                      cycles += 1
+                      
+                      # Mock the orchestrator and other dependencies
+                      with patch('symbiont.initiative.daemon.Orchestrator') as mock_orch:
+                          mock_orch.return_value.cycle.return_value = {'decision': {'action': 'test'}}
+                          
+                          with patch('symbiont.initiative.daemon._should_trigger') as mock_trigger:
+                              # Sometimes trigger, sometimes not
+                              should_trigger = random.random() < 0.3
+                              mock_trigger.return_value = (should_trigger, ['test_reason'], None)
+                              
+                              ok, reasons, result, target = run_once_if_triggered(config)
+                              
+                              if ok:
+                                  successes += 1
+                                  print(f'Cycle {cycles}: Success ({successes}/{cycles} = {successes/cycles:.1%})')
+                              
+                      # Brief pause between cycles
+                      time.sleep(0.5)
+                      
+                      # Stop if we have enough data
+                      if cycles >= 20:
+                          break
+                          
+                  except KeyboardInterrupt:
+                      break
+                  except Exception as e:
+                      print(f'Cycle {cycles} failed (expected under chaos): {type(e).__name__}')
+                      # Continue running - failures are expected under chaos
+              
+              duration = time.time() - start_time
+              success_rate = successes / cycles if cycles > 0 else 0
+              
+              print(f'🎯 Eternal mode simulation completed:')
+              print(f'   Duration: {duration:.1f}s')
+              print(f'   Cycles: {cycles}')
+              print(f'   Successes: {successes}')
+              print(f'   Success rate: {success_rate:.1%}')
+              
+              # Should maintain some functionality
+              assert cycles > 0, 'No cycles completed'
+              assert success_rate > 0.05, f'Success rate too low: {success_rate:.1%}'
+              
+              print('✅ Eternal mode simulation passed')
+              
+          finally:
+              chaos.cleanup_chaos()
+          "
+
+  report-results:
+    runs-on: ubuntu-latest
+    needs: [chaos-testing, adversarial-security, eternal-mode-simulation]
+    if: always()
+    
+    steps:
+      - name: Generate chaos test report
+        run: |
+          echo "# 🔥 Chaos Battle Test Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Test Matrix Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Check job results
+          if [ "${{ needs.chaos-testing.result }}" == "success" ]; then
+            echo "✅ **Chaos Testing**: Passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Chaos Testing**: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ needs.adversarial-security.result }}" == "success" ]; then
+            echo "✅ **Adversarial Security**: Passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Adversarial Security**: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ needs.eternal-mode-simulation.result }}" == "success" ]; then
+            echo "✅ **Eternal Mode Simulation**: Passed" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.eternal-mode-simulation.result }}" == "skipped" ]; then
+            echo "⏭️ **Eternal Mode Simulation**: Skipped" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Eternal Mode Simulation**: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Summary" >> $GITHUB_STEP_SUMMARY
+          echo "The chaos battle testing validates Symbiont's resilience under:" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔌 **LLM service outages** and timeouts" >> $GITHUB_STEP_SUMMARY
+          echo "- 🌐 **Network failures** and webhook issues" >> $GITHUB_STEP_SUMMARY
+          echo "- 💾 **Database corruption** and lock contention" >> $GITHUB_STEP_SUMMARY
+          echo "- 🛡️ **Prompt injection** and security attacks" >> $GITHUB_STEP_SUMMARY
+          echo "- 💥 **Resource exhaustion** and memory pressure" >> $GITHUB_STEP_SUMMARY
+          echo "- ⚙️ **Configuration tampering** and malformed inputs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "These tests ensure Symbiont maintains functionality and graceful degradation under adverse conditions." >> $GITHUB_STEP_SUMMARY

@@ -15,6 +15,13 @@ from tenacity import (
     wait_fixed,
 )
 
+from ..tools.retry_utils import (
+    RetryConfig,
+    DAEMON_RETRY_CONFIG,
+    retry_call,
+    get_circuit_breaker,
+)
+
 from ..orchestrator import Orchestrator
 from ..agents.registry import AgentRegistry, CrewRunner
 from ..llm.client import LLMClient
@@ -25,6 +32,7 @@ from symbiont.foresight import HuntConfig, ForesightAnalyzer, run_hunt_async
 from .watchers import RepoWatchConfig, build_repo_watch_configs
 from .pubsub import get_client
 from .state import get_state_store, resolve_node_id
+from .heartbeat import start_heartbeat_manager, stop_heartbeat_manager, get_heartbeat_manager
 
 
 STATE_DIR = os.path.join("./data", "initiative")
@@ -528,15 +536,21 @@ def propose_once(cfg: Dict[str, Any], reason: str = "watchers", *, target: RepoW
     orch = Orchestrator(cfg)
 
     retry_cfg = (cfg.get("initiative") or {}).get("retry", {})
-    attempts = int(retry_cfg.get("attempts", 3))
-    base_delay = float(retry_cfg.get("base_delay", 1.0))
-    backoff = float(retry_cfg.get("backoff", 2.0))
+    daemon_retry_config = RetryConfig(
+        attempts=max(1, int(retry_cfg.get("attempts", 3) or 3)),
+        initial_wait=max(0.1, float(retry_cfg.get("base_delay", 1.0) or 1.0)),
+        multiplier=max(1.0, float(retry_cfg.get("backoff", 2.0) or 2.0)),
+        max_wait=max(5.0, float(retry_cfg.get("max_wait", 60.0) or 60.0)),
+        jitter=bool(retry_cfg.get("jitter", True)),
+        failure_threshold=max(1, int(retry_cfg.get("failure_threshold", 5) or 5)),
+        recovery_timeout=max(60.0, float(retry_cfg.get("recovery_timeout", 180.0) or 180.0)),
+    )
+    circuit_breaker_name = f"daemon_proposal_{target.path if target else 'default'}"
 
-    res = _retry(
+    res = retry_call(
         lambda: orch.cycle(goal=goal),
-        attempts=max(1, attempts),
-        base_delay=base_delay,
-        backoff=max(1.0, backoff),
+        config=daemon_retry_config,
+        circuit_breaker=circuit_breaker_name,
     )
     st = _load_state()
     now = _now()
@@ -616,6 +630,32 @@ def daemon_loop(cfg: Dict[str, Any], poll_seconds: int = 60):
 
     store = get_state_store(cfg)
     node_id = resolve_node_id(cfg)
+    
+    # Start heartbeat manager for coordination
+    heartbeat_manager = start_heartbeat_manager(cfg)
+    
+    # Get system capabilities
+    capabilities = {
+        "daemon": True,
+        "initiative": True,
+        "poll_seconds": poll_seconds,
+        "python_version": f"{os.sys.version_info.major}.{os.sys.version_info.minor}",
+    }
+    
+    # Try to get system load and memory info
+    try:
+        import psutil
+        load_avg = psutil.getloadavg()[0] if hasattr(psutil, 'getloadavg') else 0.0
+        memory_info = psutil.virtual_memory()
+        memory_usage = memory_info.percent / 100.0
+        capabilities.update({
+            "cpu_count": psutil.cpu_count(),
+            "memory_total_gb": round(memory_info.total / (1024**3), 1),
+        })
+    except ImportError:
+        load_avg = 0.0
+        memory_usage = 0.0
+    
     store.record_daemon(
         node_id=node_id,
         pid=os.getpid(),
@@ -627,20 +667,29 @@ def daemon_loop(cfg: Dict[str, Any], poll_seconds: int = 60):
             "startup": True,
             "started_ts": int(st.get("daemon_started_ts", _now())),
         },
+        capabilities=capabilities,
+        load_avg=load_avg,
+        memory_usage=memory_usage,
     )
 
     retry_cfg = (cfg.get("initiative") or {}).get("retry", {})
-    daemon_attempts = max(1, int(retry_cfg.get("attempts", 3) or 3))
-    daemon_base = max(0.1, float(retry_cfg.get("base_delay", 1.0) or 1.0))
-    daemon_backoff = max(1.0, float(retry_cfg.get("backoff", 2.0) or 2.0))
+    daemon_retry_config = RetryConfig(
+        attempts=max(1, int(retry_cfg.get("attempts", 3) or 3)),
+        initial_wait=max(0.1, float(retry_cfg.get("base_delay", 1.0) or 1.0)),
+        multiplier=max(1.0, float(retry_cfg.get("backoff", 2.0) or 2.0)),
+        max_wait=max(5.0, float(retry_cfg.get("max_wait", 60.0) or 60.0)),
+        jitter=bool(retry_cfg.get("jitter", True)),
+        failure_threshold=max(3, int(retry_cfg.get("failure_threshold", 10) or 10)),
+        recovery_timeout=max(120.0, float(retry_cfg.get("recovery_timeout", 300.0) or 300.0)),
+    )
+    daemon_circuit_breaker = "daemon_main_loop"
 
     while True:
         try:
-            ok, reasons, _, target = _retry(
+            ok, reasons, _, target = retry_call(
                 lambda: run_once_if_triggered(cfg),
-                attempts=daemon_attempts,
-                base_delay=daemon_base,
-                backoff=daemon_backoff,
+                config=daemon_retry_config,
+                circuit_breaker=daemon_circuit_breaker,
             )
             now = _now()
             st = _load_state()
@@ -671,6 +720,16 @@ def daemon_loop(cfg: Dict[str, Any], poll_seconds: int = 60):
             break
         except Exception as e:
             print("[initiative] error:", e)
+            
+            # Get circuit breaker metrics for monitoring
+            cb_metrics = get_circuit_breaker(daemon_circuit_breaker, daemon_retry_config).get_metrics()
+            error_details = {
+                "error": str(e),
+                "started_ts": int(st.get("daemon_started_ts", _now())),
+                "circuit_breaker_state": cb_metrics["state"],
+                "circuit_breaker_failures": cb_metrics["failure_count"],
+            }
+            
             store.record_daemon(
                 node_id=node_id,
                 pid=os.getpid(),
@@ -678,18 +737,30 @@ def daemon_loop(cfg: Dict[str, Any], poll_seconds: int = 60):
                 poll_seconds=poll_seconds,
                 last_check_ts=_now(),
                 last_proposal_ts=int(st.get("last_proposal_ts", 0)),
-                details={
-                    "error": str(e),
-                    "started_ts": int(st.get("daemon_started_ts", _now())),
-                },
+                details=error_details,
             )
-            time.sleep(daemon_base)
+            
+            if cb_metrics["state"] == "open":
+                logger.warning(
+                    "Daemon circuit breaker is open (success_rate: %.2f%%), sleeping longer",
+                    cb_metrics["success_rate"] * 100,
+                )
+                time.sleep(daemon_retry_config.recovery_timeout / 4)  # Sleep longer when circuit is open
+            else:
+                time.sleep(daemon_retry_config.initial_wait)
             continue
         time.sleep(poll_seconds)
     st = _load_state()
     st.update({"daemon_running": False})
     _save_state(st)
     store.mark_daemon_stopped(node_id)
+    
+    # Stop heartbeat manager
+    try:
+        stop_heartbeat_manager()
+        print("[initiative] heartbeat manager stopped")
+    except Exception as exc:
+        print(f"[initiative] error stopping heartbeat manager: {exc}")
 
 
 def get_status(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -700,8 +771,16 @@ def get_status(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     except Exception:
         current = None
 
+    # Get cluster status from heartbeat manager if available
+    cluster_status = {}
+    try:
+        heartbeat_manager = get_heartbeat_manager(cfg)
+        cluster_status = heartbeat_manager.get_cluster_status()
+    except Exception as exc:
+        cluster_status = {"error": f"Failed to get cluster status: {exc}"}
+
     if current:
-        return {
+        status = {
             "last_check_ts": int(current.get("last_check_ts") or 0),
             "last_proposal_ts": int(current.get("last_proposal_ts") or 0),
             "daemon_running": current.get("status") in {"running", "error"},
@@ -710,7 +789,13 @@ def get_status(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "state_path": os.path.abspath(STATE_PATH),
             "status": current.get("status"),
             "node_id": current.get("node_id"),
+            "heartbeat_ts": int(current.get("heartbeat_ts", 0) or 0),
+            "capabilities": current.get("capabilities", {}),
+            "load_avg": current.get("load_avg", 0.0),
+            "memory_usage": current.get("memory_usage", 0.0),
+            "cluster": cluster_status,
         }
+        return status
 
     st = _load_state()
     return {
@@ -720,5 +805,6 @@ def get_status(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "daemon_started_ts": int(st.get("daemon_started_ts", 0)),
         "daemon_pid": int(st.get("daemon_pid", 0)),
         "state_path": os.path.abspath(STATE_PATH),
+        "cluster": cluster_status,
     }
 logger = logging.getLogger(__name__)

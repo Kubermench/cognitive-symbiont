@@ -12,6 +12,12 @@ import requests
 
 from .graphrag import add_claim
 from .db import MemoryDB
+from ..tools.retry_utils import (
+    RetryConfig,
+    EXTERNAL_API_RETRY_CONFIG,
+    retry_call,
+    with_retry,
+)
 
 
 CACHE_DIR = Path("data/external")
@@ -50,11 +56,13 @@ class ExternalSourceFetcher:
         cache_dir: Path | str = CACHE_DIR,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         session: Optional[requests.Session] = None,
+        retry_config: Optional[RetryConfig] = None,
     ) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.ttl_seconds = max(60, int(ttl_seconds))
         self._session = session or requests.Session()
+        self._retry_config = retry_config or EXTERNAL_API_RETRY_CONFIG
 
     # ------------------------------------------------------------------
     def search(
@@ -113,13 +121,22 @@ class ExternalSourceFetcher:
             "start": 0,
             "max_results": max(1, min(10, limit)),
         }
-        response = self._session.get(
-            "http://export.arxiv.org/api/query",
-            params=params,
-            headers={"User-Agent": USER_AGENT},
-            timeout=12,
+        
+        def make_request():
+            response = self._session.get(
+                "http://export.arxiv.org/api/query",
+                params=params,
+                headers={"User-Agent": USER_AGENT},
+                timeout=12,
+            )
+            response.raise_for_status()
+            return response
+        
+        response = retry_call(
+            make_request,
+            config=self._retry_config,
+            circuit_breaker="external_arxiv",
         )
-        response.raise_for_status()
 
         import xml.etree.ElementTree as ET
 
@@ -161,13 +178,22 @@ class ExternalSourceFetcher:
             "limit": max(1, min(10, limit)),
             "fields": "title,abstract,url,venue,year,authors",
         }
-        response = self._session.get(
-            "https://api.semanticscholar.org/graph/v1/paper/search",
-            params=params,
-            headers={"User-Agent": USER_AGENT},
-            timeout=12,
+        
+        def make_request():
+            response = self._session.get(
+                "https://api.semanticscholar.org/graph/v1/paper/search",
+                params=params,
+                headers={"User-Agent": USER_AGENT},
+                timeout=12,
+            )
+            response.raise_for_status()
+            return response
+        
+        response = retry_call(
+            make_request,
+            config=self._retry_config,
+            circuit_breaker="external_semantic_scholar",
         )
-        response.raise_for_status()
         payload = response.json()
         data = payload.get("data") or []
         for item in data:

@@ -28,6 +28,13 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
+from .retry_utils import (
+    RetryConfig,
+    EXTERNAL_API_RETRY_CONFIG,
+    retry_call,
+    with_retry,
+)
+
 from symbiont.llm.client import LLMClient
 from symbiont.memory.db import MemoryDB
 from symbiont.memory import retrieval
@@ -381,10 +388,15 @@ async def gather_trend_sources_async(
     return ranked
 
 
-@retry(
-    retry=retry_if_exception_type((ValueError, RuntimeError)),
-    stop=stop_after_attempt(3),
-    wait=wait_exponential_jitter(initial=1, max=12),
+@with_retry(
+    config=RetryConfig(
+        attempts=3,
+        initial_wait=1.0,
+        max_wait=12.0,
+        jitter=True,
+        retry_exceptions=(ValueError, RuntimeError),
+    ),
+    circuit_breaker="research_peer_collaborators",
 )
 def call_peer_collaborators(
     llm: LLMClient,

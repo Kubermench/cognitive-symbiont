@@ -21,6 +21,13 @@ from tenacity import (
     wait_exponential,
 )
 
+from ..tools.retry_utils import (
+    RetryConfig,
+    WEBHOOK_RETRY_CONFIG,
+    retry_call,
+    get_circuit_breaker,
+)
+
 from ..agents.registry import AgentRegistry
 from ..agents.subself import SubSelf
 from ..llm.budget import TokenBudget
@@ -834,10 +841,19 @@ class GraphRunner:
             if extra_url and not _is_url_allowed(extra_url, allow_domains):
                 logger.warning("Skipping %s: '%s' not allowlisted", key, extra_url)
 
-        max_attempts = max(1, int(notif_cfg.get("retry_attempts", 3) or 3))
-        backoff = max(0.5, float(notif_cfg.get("retry_backoff_seconds", 2.0) or 2.0))
-        max_backoff = float(notif_cfg.get("retry_max_seconds", backoff * 8.0) or (backoff * 8.0))
-        timeout = float(notif_cfg.get("timeout_seconds", 5.0) or 5.0)
+        # Enhanced retry configuration for webhooks
+        retry_cfg = notif_cfg.get("retry", {}) or {}
+        webhook_retry_config = RetryConfig(
+            attempts=max(1, int(retry_cfg.get("attempts", 3) or 3)),
+            initial_wait=max(0.5, float(retry_cfg.get("initial_wait", 2.0) or 2.0)),
+            max_wait=max(5.0, float(retry_cfg.get("max_wait", 60.0) or 60.0)),
+            multiplier=max(1.0, float(retry_cfg.get("multiplier", 2.0) or 2.0)),
+            jitter=bool(retry_cfg.get("jitter", True)),
+            failure_threshold=max(1, int(retry_cfg.get("failure_threshold", 3) or 3)),
+            recovery_timeout=max(60.0, float(retry_cfg.get("recovery_timeout", 300.0) or 300.0)),
+        )
+        timeout = float(notif_cfg.get("timeout_seconds", 10.0) or 10.0)
+        circuit_breaker_name = f"webhook_{url.split('/')[-2] if '/' in url else 'default'}"
 
         if isinstance(self.cfg, dict):
             data_root = Path(
@@ -874,55 +890,48 @@ class GraphRunner:
                 logger.debug("Failed writing handoff notification log", exc_info=True)
 
         def sender() -> None:
-            retryer = self._webhook_retryer(max_attempts, backoff, max_backoff)
+            def send_webhook():
+                response = requests.post(url, json=payload, timeout=timeout)
+                response.raise_for_status()
+                return response
+            
             try:
-                retryer(lambda: requests.post(url, json=payload, timeout=timeout))
-            except RetryError as exc:
-                cause = exc.last_attempt.outcome.exception() if exc.last_attempt else exc
-                message = str(cause)
-                _write_log("failure", message)
-                logger.warning(
-                    "Handoff webhook failed after %s attempts: %s",
-                    max_attempts,
-                    message,
+                retry_call(
+                    send_webhook,
+                    config=webhook_retry_config,
+                    circuit_breaker=circuit_breaker_name,
                 )
-                return
-            except Exception as exc:  # pragma: no cover - unexpected transport errors
+                _write_log("success")
+                logger.info("Handoff webhook sent successfully to %s", url)
+            except Exception as exc:
                 _write_log("failure", str(exc))
-                logger.warning("Handoff webhook error: %s", exc)
-                return
-
-            _write_log("success")
+                logger.error(
+                    "Handoff webhook failed after %d attempts: %s",
+                    webhook_retry_config.attempts,
+                    exc,
+                )
+                
+                # Get circuit breaker metrics for monitoring
+                cb_metrics = get_circuit_breaker(circuit_breaker_name, webhook_retry_config).get_metrics()
+                if cb_metrics["state"] == "open":
+                    logger.warning(
+                        "Webhook circuit breaker '%s' is open (success_rate: %.2f%%)",
+                        circuit_breaker_name,
+                        cb_metrics["success_rate"] * 100,
+                    )
 
         thread = threading.Thread(target=sender, name="handoff_webhook", daemon=True)
         thread.start()
 
-    def _webhook_retryer(self, attempts: int, backoff: float, max_backoff: float) -> Retrying:
-        capped_attempts = max(1, attempts)
-
-        def _log_retry(state: RetryCallState) -> None:
-            exc = state.outcome.exception() if state.outcome else None
-            if exc:
-                logger.warning(
-                    "Webhook retry %s/%s failed: %s",
-                    state.attempt_number,
-                    capped_attempts,
-                    exc,
-                )
-
-        return Retrying(
-            retry=retry_if_exception_type(Exception),
-            stop=stop_after_attempt(capped_attempts),
-            wait=wait_exponential(
-                multiplier=backoff,
-                exp_base=2.0,
-                min=backoff,
-                max=max(max_backoff, backoff),
-            ),
-            reraise=True,
-            sleep=time.sleep,
-            before_sleep=_log_retry,
-        )
+    def get_webhook_circuit_breaker_metrics(self) -> Dict[str, Dict[str, Any]]:
+        """Get metrics for all webhook circuit breakers."""
+        from ..tools.retry_utils import list_circuit_breakers
+        
+        webhook_metrics = {}
+        for name, metrics in list_circuit_breakers().items():
+            if name.startswith("webhook_"):
+                webhook_metrics[name] = metrics
+        return webhook_metrics
 
     def _resolve_parallel_next(
         self,
