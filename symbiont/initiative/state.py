@@ -11,6 +11,14 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
+from tenacity import (
+    RetryCallState,
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
 from ..tools.files import ensure_dirs
 
 logger = logging.getLogger(__name__)
@@ -19,17 +27,46 @@ logger = logging.getLogger(__name__)
 class SQLiteStateBackend:
     """SQLite-backed persistence for initiative + swarm heartbeat."""
 
-    def __init__(self, path: Optional[str] = None, *, ttl_seconds: int = 900):
+    def __init__(self, path: Optional[str] = None, *, ttl_seconds: int = 900, retry_attempts: int = 3):
         default_path = Path("./data/initiative/state.db")
         self.path = Path(path).expanduser().resolve() if path else default_path.resolve()
         ensure_dirs([self.path.parent])
         self.ttl_seconds = max(60, int(ttl_seconds))
+        self.retry_attempts = max(1, int(retry_attempts))
         self._init_schema()
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=10, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA cache_size=10000;")
+        conn.execute("PRAGMA temp_store=MEMORY;")
         return conn
+
+    def _execute_with_retry(self, operation, *args, **kwargs):
+        """Execute database operation with retry logic."""
+        if self.retry_attempts <= 1:
+            return operation(*args, **kwargs)
+
+        def _log_retry_warning(retry_state: RetryCallState) -> None:
+            exc = retry_state.outcome.exception() if retry_state.outcome else None
+            if exc:
+                logger.warning(
+                    "State DB retry %s/%s failed: %s",
+                    retry_state.attempt_number,
+                    self.retry_attempts,
+                    exc,
+                )
+
+        retryer = Retrying(
+            retry=retry_if_exception_type((sqlite3.OperationalError, sqlite3.DatabaseError)),
+            stop=stop_after_attempt(self.retry_attempts),
+            wait=wait_exponential(multiplier=0.1, exp_base=2, min=0.1, max=2.0),
+            reraise=True,
+            before_sleep=_log_retry_warning,
+        )
+        
+        return retryer(operation, *args, **kwargs)
 
     def _init_schema(self) -> None:
         with self._conn() as conn:
@@ -70,54 +107,70 @@ class SQLiteStateBackend:
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
         payload = json.dumps(details or {}, separators=(",", ":"))
-        with self._conn() as conn:
-            conn.execute(
-                """
-                INSERT INTO daemon_state (node_id, pid, status, poll_seconds, last_check_ts, last_proposal_ts, details, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
-                ON CONFLICT(node_id) DO UPDATE SET
-                    pid=excluded.pid,
-                    status=excluded.status,
-                    poll_seconds=excluded.poll_seconds,
-                    last_check_ts=excluded.last_check_ts,
-                    last_proposal_ts=excluded.last_proposal_ts,
-                    details=excluded.details,
-                    updated_at=excluded.updated_at;
-                """,
-                (
-                    node_id,
-                    int(pid),
-                    status,
-                    int(poll_seconds),
-                    int(last_check_ts),
-                    int(last_proposal_ts),
-                    payload,
-                ),
-            )
+        
+        def _record():
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO daemon_state (node_id, pid, status, poll_seconds, last_check_ts, last_proposal_ts, details, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+                    ON CONFLICT(node_id) DO UPDATE SET
+                        pid=excluded.pid,
+                        status=excluded.status,
+                        poll_seconds=excluded.poll_seconds,
+                        last_check_ts=excluded.last_check_ts,
+                        last_proposal_ts=excluded.last_proposal_ts,
+                        details=excluded.details,
+                        updated_at=excluded.updated_at;
+                    """,
+                    (
+                        node_id,
+                        int(pid),
+                        status,
+                        int(poll_seconds),
+                        int(last_check_ts),
+                        int(last_proposal_ts),
+                        payload,
+                    ),
+                )
+        
+        self._execute_with_retry(_record)
 
     def mark_daemon_stopped(self, node_id: str) -> None:
-        with self._conn() as conn:
-            conn.execute(
-                """
-                UPDATE daemon_state
-                SET status='stopped', updated_at=strftime('%s','now')
-                WHERE node_id=?;
-                """,
-                (node_id,),
-            )
+        def _mark_stopped():
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    UPDATE daemon_state
+                    SET status='stopped', updated_at=strftime('%s','now')
+                    WHERE node_id=?;
+                    """,
+                    (node_id,),
+                )
+        
+        self._execute_with_retry(_mark_stopped)
 
     def load_daemon(self, node_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        query = "SELECT node_id, pid, status, poll_seconds, last_check_ts, last_proposal_ts, details, updated_at FROM daemon_state"
-        params: Iterable[Any]
-        if node_id:
-            query += " WHERE node_id=?"
-            params = (node_id,)
-        else:
-            query += " ORDER BY updated_at DESC"
-            params = ()
+        def _load():
+            query = "SELECT node_id, pid, status, poll_seconds, last_check_ts, last_proposal_ts, details, updated_at FROM daemon_state"
+            params: Iterable[Any]
+            if node_id:
+                query += " WHERE node_id=?"
+                params = (node_id,)
+            else:
+                query += " ORDER BY updated_at DESC"
+                params = ()
 
-        with self._conn() as conn:
-            row = conn.execute(query + " LIMIT 1", params).fetchone()
+            with self._conn() as conn:
+                row = conn.execute(query + " LIMIT 1", params).fetchone()
+            return row
+        
+        try:
+            row = self._execute_with_retry(_load)
+        except Exception as exc:
+            logger.warning("Failed to load daemon state: %s", exc)
+            return None
+            
         if not row:
             return None
         try:
@@ -308,6 +361,7 @@ class InitiativeStateStore:
     def __init__(self, backend: str, cfg: Dict[str, Any]):
         backend = (backend or "sqlite").lower()
         ttl = int(cfg.get("swarm_ttl_seconds", 900) or 900)
+        retry_attempts = int(cfg.get("retry_attempts", 3) or 3)
         if backend == "redis":
             try:
                 self._backend = RedisStateBackend(cfg.get("redis", {}))
@@ -316,7 +370,7 @@ class InitiativeStateStore:
             except Exception as exc:  # pragma: no cover - requires redis env
                 logger.warning("Redis state backend unavailable (%s); falling back to SQLite", exc)
         path = cfg.get("path")
-        self._backend = SQLiteStateBackend(path, ttl_seconds=ttl)
+        self._backend = SQLiteStateBackend(path, ttl_seconds=ttl, retry_attempts=retry_attempts)
         self.kind = "sqlite"
 
     def record_daemon(self, **kwargs: Any) -> None:

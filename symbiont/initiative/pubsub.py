@@ -9,9 +9,18 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from tenacity import (
+    RetryCallState,
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from ..tools.files import ensure_dirs
 
@@ -29,6 +38,10 @@ class PubSubConfig:
     host: str = "localhost"
     port: int = 6379
     db: int = 0
+    retry_attempts: int = 3
+    retry_initial_delay: float = 0.5
+    retry_max_delay: float = 10.0
+    retry_multiplier: float = 2.0
 
 
 class PubSubClient:
@@ -41,6 +54,12 @@ class PubSubClient:
         self.channel = parsed.channel or "symbiont:initiative"
         self._redis = None
         self._log_path: Optional[Path] = None
+        
+        # Retry configuration
+        self.retry_attempts = max(1, int(parsed.retry_attempts))
+        self.retry_initial_delay = max(0.1, float(parsed.retry_initial_delay))
+        self.retry_max_delay = max(self.retry_initial_delay, float(parsed.retry_max_delay))
+        self.retry_multiplier = max(1.0, float(parsed.retry_multiplier))
 
         if not self.enabled:
             return
@@ -76,16 +95,56 @@ class PubSubClient:
         payload = json.dumps(event, separators=(",", ":"))
 
         if self.backend == "redis" and self._redis is not None:
-            try:
-                self._redis.publish(self.channel, payload)
-            except Exception as exc:  # pragma: no cover - depends on Redis availability
-                logger.warning("Failed to publish initiative event to Redis: %s", exc)
+            self._publish_with_retry(self._publish_redis, payload)
         elif self._log_path is not None:
+            self._publish_with_retry(self._publish_log, payload)
+
+    def _publish_redis(self, payload: str) -> None:
+        """Publish to Redis without retry logic."""
+        self._redis.publish(self.channel, payload)
+
+    def _publish_log(self, payload: str) -> None:
+        """Publish to log file without retry logic."""
+        with self._log_path.open("a", encoding="utf-8") as fh:
+            fh.write(payload + "\n")
+
+    def _publish_with_retry(self, publish_func, payload: str) -> None:
+        """Execute publish function with exponential backoff retry."""
+        if self.retry_attempts <= 1:
             try:
-                with self._log_path.open("a", encoding="utf-8") as fh:
-                    fh.write(payload + "\n")
-            except Exception as exc:  # pragma: no cover - disk errors are environment specific
-                logger.warning("Failed to append initiative event log: %s", exc)
+                publish_func(payload)
+            except Exception as exc:
+                logger.warning("Failed to publish initiative event: %s", exc)
+            return
+
+        def _log_retry_warning(retry_state: RetryCallState) -> None:
+            exc = retry_state.outcome.exception() if retry_state.outcome else None
+            if exc:
+                logger.warning(
+                    "PubSub retry %s/%s failed: %s",
+                    retry_state.attempt_number,
+                    self.retry_attempts,
+                    exc,
+                )
+
+        retryer = Retrying(
+            retry=retry_if_exception_type(Exception),
+            stop=stop_after_attempt(self.retry_attempts),
+            wait=wait_exponential(
+                multiplier=self.retry_initial_delay,
+                exp_base=self.retry_multiplier,
+                min=self.retry_initial_delay,
+                max=self.retry_max_delay,
+            ),
+            reraise=False,  # Don't re-raise, just log the final failure
+            before_sleep=_log_retry_warning,
+            sleep=time.sleep,
+        )
+        
+        try:
+            retryer(publish_func, payload)
+        except Exception as exc:
+            logger.warning("Failed to publish initiative event after %s attempts: %s", self.retry_attempts, exc)
 
 
 def get_client(cfg: Dict[str, Any], *, data_root: Path | None = None) -> PubSubClient:

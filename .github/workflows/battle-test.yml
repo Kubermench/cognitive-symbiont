@@ -1,0 +1,238 @@
+name: Battle Test - Chaos & Adversarial Resilience
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run battle tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      test_duration:
+        description: 'Test duration in minutes'
+        required: false
+        default: '30'
+        type: string
+      failure_rate:
+        description: 'Simulated failure rate (0.0-1.0)'
+        required: false
+        default: '0.3'
+        type: string
+
+jobs:
+  battle-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    strategy:
+      matrix:
+        test_suite: [chaos, adversarial, property-based, stress]
+        python-version: [3.11, 3.12]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y redis-server sqlite3
+    
+    - name: Start Redis
+      run: |
+        sudo systemctl start redis-server
+        redis-cli ping
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install -r requirements-optional.txt
+    
+    - name: Run Chaos Tests
+      if: matrix.test_suite == 'chaos'
+      run: |
+        pytest tests/test_chaos_resilience.py -v \
+          --tb=short \
+          --maxfail=5 \
+          --durations=10 \
+          -x
+    
+    - name: Run Adversarial Tests
+      if: matrix.test_suite == 'adversarial'
+      run: |
+        pytest tests/test_adversarial_resilience.py -v \
+          --tb=short \
+          --maxfail=3 \
+          --durations=10 \
+          -x
+    
+    - name: Run Property-Based Tests
+      if: matrix.test_suite == 'property-based'
+      run: |
+        pytest tests/test_property_yaml_fuzzing.py -v \
+          --tb=short \
+          --maxfail=10 \
+          --durations=20 \
+          -x
+    
+    - name: Run Stress Tests
+      if: matrix.test_suite == 'stress'
+      run: |
+        pytest tests/test_transcript_properties.py -v \
+          --tb=short \
+          --maxfail=5 \
+          --durations=15 \
+          -x
+    
+    - name: Run All Battle Tests
+      if: matrix.test_suite == 'chaos' && matrix.python-version == '3.11'
+      run: |
+        pytest tests/test_chaos_resilience.py tests/test_adversarial_resilience.py tests/test_property_yaml_fuzzing.py -v \
+          --tb=short \
+          --maxfail=20 \
+          --durations=30 \
+          --junitxml=battle-test-results.xml
+    
+    - name: Upload Battle Test Results
+      if: matrix.test_suite == 'chaos' && matrix.python-version == '3.11'
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: battle-test-results-${{ matrix.python-version }}
+        path: battle-test-results.xml
+
+  fault-injection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+    
+    - name: Install fault injection tools
+      run: |
+        pip install chaos-engineering pytest-chaos
+    
+    - name: Run Fault Injection Tests
+      run: |
+        # Simulate network failures
+        pytest tests/test_daemon_retry.py -v --chaos-network-failure=0.3
+        
+        # Simulate disk failures
+        pytest tests/test_initiative_state.py -v --chaos-disk-failure=0.2
+        
+        # Simulate memory pressure
+        pytest tests/test_swarm.py -v --chaos-memory-pressure=0.1
+
+  performance-under-chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install pytest-benchmark
+    
+    - name: Run Performance Tests Under Chaos
+      run: |
+        pytest tests/test_chaos_resilience.py::test_concurrent_chaos -v \
+          --benchmark-only \
+          --benchmark-save=chaos-performance \
+          --benchmark-sort=mean
+    
+    - name: Upload Performance Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: chaos-performance-results
+        path: .benchmarks/
+
+  security-resilience:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+    
+    - name: Run Security Resilience Tests
+      run: |
+        pytest tests/test_swarm_security.py -v
+        pytest tests/test_security.py -v
+        pytest tests/test_chaos_resilience.py::test_adversarial_prompt_injection -v
+    
+    - name: Run PII Sanitization Tests
+      run: |
+        # Test PII detection and sanitization
+        python -c "
+        from symbiont.tools.security import sanitize_pii
+        test_data = 'User email: john.doe@example.com, SSN: 123-45-6789'
+        sanitized = sanitize_pii(test_data)
+        assert 'john.doe@example.com' not in sanitized
+        assert '123-45-6789' not in sanitized
+        print('PII sanitization test passed')
+        "
+
+  battle-report:
+    needs: [battle-test, fault-injection, performance-under-chaos, security-resilience]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Generate Battle Test Report
+      run: |
+        echo "# Battle Test Report" > battle-report.md
+        echo "Generated: $(date)" >> battle-report.md
+        echo "" >> battle-report.md
+        echo "## Test Results Summary" >> battle-report.md
+        echo "- Chaos Tests: ${{ needs.battle-test.result }}" >> battle-report.md
+        echo "- Fault Injection: ${{ needs.fault-injection.result }}" >> battle-report.md
+        echo "- Performance: ${{ needs.performance-under-chaos.result }}" >> battle-report.md
+        echo "- Security: ${{ needs.security-resilience.result }}" >> battle-report.md
+        echo "" >> battle-report.md
+        echo "## Resilience Score" >> battle-report.md
+        echo "Overall system resilience: ${{ (needs.battle-test.result == 'success' && needs.fault-injection.result == 'success' && needs.performance-under-chaos.result == 'success' && needs.security-resilience.result == 'success') && 'PASS' || 'FAIL' }}" >> battle-report.md
+    
+    - name: Upload Battle Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: battle-test-report
+        path: battle-report.md
