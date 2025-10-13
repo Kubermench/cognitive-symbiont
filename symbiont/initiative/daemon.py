@@ -623,6 +623,7 @@ def daemon_loop(cfg: Dict[str, Any], poll_seconds: int = 60):
         poll_seconds=poll_seconds,
         last_check_ts=int(st.get("last_check_ts", 0)),
         last_proposal_ts=int(st.get("last_proposal_ts", 0)),
+        last_heartbeat_ts=_now(),
         details={
             "startup": True,
             "started_ts": int(st.get("daemon_started_ts", _now())),
@@ -653,6 +654,7 @@ def daemon_loop(cfg: Dict[str, Any], poll_seconds: int = 60):
                 poll_seconds=poll_seconds,
                 last_check_ts=now,
                 last_proposal_ts=int(st.get("last_proposal_ts", 0)),
+                last_heartbeat_ts=now,
                 details={
                     "ok": bool(ok),
                     "reasons": reasons,

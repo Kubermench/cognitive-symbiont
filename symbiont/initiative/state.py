@@ -42,6 +42,7 @@ class SQLiteStateBackend:
                     poll_seconds INTEGER,
                     last_check_ts INTEGER,
                     last_proposal_ts INTEGER,
+                    last_heartbeat_ts INTEGER,
                     details TEXT,
                     updated_at INTEGER
                 );
@@ -52,8 +53,19 @@ class SQLiteStateBackend:
                     status TEXT,
                     active_goal TEXT,
                     variants INTEGER,
+                    last_heartbeat_ts INTEGER,
                     details TEXT,
                     updated_at INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT,
+                    node_id TEXT,
+                    worker_id TEXT,
+                    message TEXT,
+                    details TEXT,
+                    timestamp INTEGER
                 );
                 """
             )
@@ -67,20 +79,23 @@ class SQLiteStateBackend:
         poll_seconds: int,
         last_check_ts: int,
         last_proposal_ts: int,
+        last_heartbeat_ts: Optional[int] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
         payload = json.dumps(details or {}, separators=(",", ":"))
+        heartbeat_ts = last_heartbeat_ts or int(time.time())
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO daemon_state (node_id, pid, status, poll_seconds, last_check_ts, last_proposal_ts, details, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+                INSERT INTO daemon_state (node_id, pid, status, poll_seconds, last_check_ts, last_proposal_ts, last_heartbeat_ts, details, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
                 ON CONFLICT(node_id) DO UPDATE SET
                     pid=excluded.pid,
                     status=excluded.status,
                     poll_seconds=excluded.poll_seconds,
                     last_check_ts=excluded.last_check_ts,
                     last_proposal_ts=excluded.last_proposal_ts,
+                    last_heartbeat_ts=excluded.last_heartbeat_ts,
                     details=excluded.details,
                     updated_at=excluded.updated_at;
                 """,
@@ -91,6 +106,7 @@ class SQLiteStateBackend:
                     int(poll_seconds),
                     int(last_check_ts),
                     int(last_proposal_ts),
+                    int(heartbeat_ts),
                     payload,
                 ),
             )
@@ -107,7 +123,7 @@ class SQLiteStateBackend:
             )
 
     def load_daemon(self, node_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        query = "SELECT node_id, pid, status, poll_seconds, last_check_ts, last_proposal_ts, details, updated_at FROM daemon_state"
+        query = "SELECT node_id, pid, status, poll_seconds, last_check_ts, last_proposal_ts, last_heartbeat_ts, details, updated_at FROM daemon_state"
         params: Iterable[Any]
         if node_id:
             query += " WHERE node_id=?"
@@ -121,7 +137,7 @@ class SQLiteStateBackend:
         if not row:
             return None
         try:
-            details = json.loads(row[6] or "{}")
+            details = json.loads(row[7] or "{}")
         except Exception:
             details = {}
         return {
@@ -131,8 +147,9 @@ class SQLiteStateBackend:
             "poll_seconds": row[3],
             "last_check_ts": row[4],
             "last_proposal_ts": row[5],
+            "last_heartbeat_ts": row[6],
             "details": details,
-            "updated_at": row[7],
+            "updated_at": row[8],
         }
 
     def record_swarm_worker(
@@ -201,6 +218,57 @@ class SQLiteStateBackend:
                 }
             )
         return workers
+
+    def log_audit_event(
+        self,
+        *,
+        event_type: str,
+        node_id: Optional[str] = None,
+        worker_id: Optional[str] = None,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Log an audit event."""
+        payload = json.dumps(details or {}, separators=(",", ":"))
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO audit_logs (event_type, node_id, worker_id, message, details, timestamp)
+                VALUES (?, ?, ?, ?, ?, strftime('%s','now'))
+                """,
+                (event_type, node_id, worker_id, message, payload),
+            )
+
+    def get_heartbeat_status(self, node_id: str, max_age_seconds: int = 300) -> Dict[str, Any]:
+        """Get heartbeat status for a node."""
+        cutoff = int(time.time()) - max_age_seconds
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT last_heartbeat_ts, status, updated_at FROM daemon_state WHERE node_id=?",
+                (node_id,),
+            ).fetchone()
+        
+        if not row:
+            return {"status": "unknown", "last_heartbeat": None, "is_alive": False}
+        
+        last_heartbeat, status, updated_at = row
+        is_alive = last_heartbeat and last_heartbeat > cutoff
+        return {
+            "status": status,
+            "last_heartbeat": last_heartbeat,
+            "is_alive": bool(is_alive),
+            "updated_at": updated_at,
+        }
+
+    def cleanup_stale_workers(self, max_age_seconds: int = 900) -> int:
+        """Clean up stale swarm workers."""
+        cutoff = int(time.time()) - max_age_seconds
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM swarm_workers WHERE updated_at < ?",
+                (cutoff,),
+            )
+            return cursor.rowcount
 
 
 class RedisStateBackend:
@@ -336,6 +404,15 @@ class InitiativeStateStore:
 
     def list_swarm_workers(self) -> list[Dict[str, Any]]:
         return self._backend.list_swarm_workers()
+
+    def log_audit_event(self, **kwargs: Any) -> None:
+        self._backend.log_audit_event(**kwargs)
+
+    def get_heartbeat_status(self, node_id: str, max_age_seconds: int = 300) -> Dict[str, Any]:
+        return self._backend.get_heartbeat_status(node_id, max_age_seconds)
+
+    def cleanup_stale_workers(self, max_age_seconds: int = 900) -> int:
+        return self._backend.cleanup_stale_workers(max_age_seconds)
 
 
 _STORE_CACHE: Dict[tuple, InitiativeStateStore] = {}

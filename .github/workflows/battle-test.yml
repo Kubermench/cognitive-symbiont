@@ -1,0 +1,185 @@
+name: Battle Test - Adversarial Resilience
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run battle tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'Battle test duration in minutes'
+        required: false
+        default: '10'
+        type: string
+
+jobs:
+  battle-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    strategy:
+      matrix:
+        test-scenario:
+          - "llm-timeout"
+          - "network-failures"
+          - "memory-pressure"
+          - "disk-errors"
+          - "prompt-injection"
+          - "cascading-failures"
+          - "full-battle"
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install psutil  # For memory pressure testing
+    
+    - name: Install Ollama (for LLM testing)
+      run: |
+        curl -fsSL https://ollama.ai/install.sh | sh
+        ollama serve &
+        sleep 10
+        ollama pull phi3:mini
+    
+    - name: Run Battle Test - ${{ matrix.test-scenario }}
+      run: |
+        python -m pytest tests/test_chaos_injection.py::BattleTestWorkflow::test_${{ matrix.test-scenario }} \
+          -v --tb=short --durations=10 \
+          --junitxml=battle-test-${{ matrix.test-scenario }}.xml
+    
+    - name: Run Property-Based Tests
+      run: |
+        python -m pytest tests/test_property_yaml_parsing.py tests/test_property_transcript_ingestion.py \
+          -v --tb=short --durations=10 \
+          --hypothesis-show-statistics \
+          --junitxml=property-tests.xml
+    
+    - name: Run Adversarial LLM Tests
+      run: |
+        python -m pytest tests/test_adversarial_resilience.py \
+          -v --tb=short --durations=10 \
+          --junitxml=adversarial-tests.xml
+    
+    - name: Upload Battle Test Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: battle-test-results-${{ matrix.test-scenario }}
+        path: |
+          battle-test-*.xml
+          property-tests.xml
+          adversarial-tests.xml
+    
+    - name: Generate Battle Test Report
+      if: always()
+      run: |
+        echo "# Battle Test Report - ${{ matrix.test-scenario }}" >> $GITHUB_STEP_SUMMARY
+        echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "- Scenario: ${{ matrix.test-scenario }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Duration: $(date -u)" >> $GITHUB_STEP_SUMMARY
+
+  full-battle-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs: battle-test
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install psutil
+    
+    - name: Install Ollama
+      run: |
+        curl -fsSL https://ollama.ai/install.sh | sh
+        ollama serve &
+        sleep 10
+        ollama pull phi3:mini
+    
+    - name: Run Full Battle Test
+      run: |
+        python -c "
+        from tests.test_chaos_injection import BattleTestWorkflow
+        import json
+        
+        battle = BattleTestWorkflow()
+        duration = int('${{ github.event.inputs.duration_minutes || 10 }}') * 60
+        results = battle.run_battle_test(duration)
+        
+        print('Battle Test Results:')
+        print(f'Duration: {results[\"duration_seconds\"]}s')
+        print(f'Total Operations: {results[\"total_operations\"]}')
+        print(f'Success Count: {results[\"success_count\"]}')
+        print(f'Error Count: {results[\"error_count\"]}')
+        print(f'Success Rate: {results[\"success_rate\"]:.2%}')
+        
+        with open('battle-results.json', 'w') as f:
+            json.dump(results, f, indent=2)
+        "
+    
+    - name: Upload Full Battle Test Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: full-battle-test-results
+        path: battle-results.json
+    
+    - name: Generate Full Battle Test Report
+      if: always()
+      run: |
+        if [ -f battle-results.json ]; then
+          echo "# Full Battle Test Report" >> $GITHUB_STEP_SUMMARY
+          echo "## Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Duration: $(jq -r '.duration_seconds' battle-results.json)s" >> $GITHUB_STEP_SUMMARY
+          echo "- Total Operations: $(jq -r '.total_operations' battle-results.json)" >> $GITHUB_STEP_SUMMARY
+          echo "- Success Rate: $(jq -r '.success_rate' battle-results.json | awk '{printf "%.2f%%", $1*100}')" >> $GITHUB_STEP_SUMMARY
+          echo "- Injected Faults: $(jq -r '.injected_faults | length' battle-results.json)" >> $GITHUB_STEP_SUMMARY
+        fi
+
+  chaos-monitoring:
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download Battle Test Artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: battle-results/
+    
+    - name: Analyze Battle Test Results
+      run: |
+        echo "# Battle Test Analysis" >> $GITHUB_STEP_SUMMARY
+        echo "## Resilience Metrics" >> $GITHUB_STEP_SUMMARY
+        
+        # Find all battle test result files
+        find battle-results -name "battle-test-*.xml" -exec echo "Processing: {}" \;
+        
+        # Generate summary
+        echo "- All battle test scenarios completed" >> $GITHUB_STEP_SUMMARY
+        echo "- Check individual test results for detailed metrics" >> $GITHUB_STEP_SUMMARY
