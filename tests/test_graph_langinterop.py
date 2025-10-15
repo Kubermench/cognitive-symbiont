@@ -19,9 +19,9 @@ def test_graph_runner_langgraph_compile(tmp_path):
     graph_yaml = tmp_path / "foresight_graph.yaml"
     crew_config = Path("configs/crews/foresight_weaver.yaml").resolve()
     graph_yaml.write_text(
-        """graph:
+        """crew_config: "{crew}"
+graph:
   start: scout
-  crew_config: "{crew}"
   nodes:
     scout:
       agent: foresight_scout_agent
@@ -34,8 +34,9 @@ def test_graph_runner_langgraph_compile(tmp_path):
 
     spec = GraphSpec.from_yaml(graph_yaml)
     registry = AgentRegistry.from_yaml(crew_config)
-    db = MemoryDB(db_path=":memory:")
-    runner = GraphRunner(spec, registry, cfg={"db_path": ":memory:"}, db=db)
+    db_path = tmp_path / "sym.db"
+    db = MemoryDB(db_path=str(db_path))
+    runner = GraphRunner(spec, registry, cfg={"db_path": str(db_path)}, db=db)
 
     compiled = runner.compile_langgraph()
     assert compiled is not None

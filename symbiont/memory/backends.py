@@ -65,44 +65,55 @@ class GraphMemoryBackend:
     # --------------------------------------------------------------------- retrieval
     def build_indices(self, *, limit_if_new: Optional[int] = None) -> int:
         with self.db._conn() as conn:
-            msgs = conn.execute(
-                "SELECT id, role, content FROM messages ORDER BY id ASC"
-            ).fetchall()
-            arts = conn.execute(
-                "SELECT id, type, path, summary FROM artifacts ORDER BY id ASC"
-            ).fetchall()
-            existing_msg_ids = _existing_ids(conn, "message", "messages")
-            existing_art_ids = _existing_ids(conn, "artifact", "artifacts")
-
-        new_msgs = [
-            (mid, role, content)
-            for mid, role, content in msgs
-            if mid not in existing_msg_ids
-        ]
-        new_arts = [
-            (aid, typ, path, summary)
-            for aid, typ, path, summary in arts
-            if aid not in existing_art_ids
-        ]
+            last_msg_marker = _load_marker(conn, "vectors:last_message_id")
+            last_art_marker = _load_marker(conn, "vectors:last_artifact_id")
+            missing_msgs, fresh_msgs = _pending_rows(
+                conn,
+                table="messages",
+                column_list="id, role, content",
+                kind="message",
+                last_marker=last_msg_marker,
+            )
+            missing_arts, fresh_arts = _pending_rows(
+                conn,
+                table="artifacts",
+                column_list="id, type, path, summary",
+                kind="artifact",
+                last_marker=last_art_marker,
+            )
 
         if limit_if_new:
-            new_msgs = new_msgs[-int(limit_if_new) :]
-            new_arts = new_arts[-int(limit_if_new) :]
+            cap = int(limit_if_new)
+            if cap > 0:
+                fresh_msgs = fresh_msgs[-cap:]
+                fresh_arts = fresh_arts[-cap:]
+        pending_msgs = _merge_rows(missing_msgs, fresh_msgs)
+        pending_arts = _merge_rows(missing_arts, fresh_arts)
 
         count = 0
-        if new_msgs or new_arts:
+        msg_marker = last_msg_marker
+        art_marker = last_art_marker
+        if pending_msgs or pending_arts:
             with self.db._conn() as conn:
-                for mid, role, content in new_msgs:
+                for mid, role, content in pending_msgs:
                     vec = cheap_embed([f"{role}: {content}"])[0]
                     _upsert(conn, "message", "messages", mid, vec)
                     count += 1
-                for aid, typ, path, summary in new_arts:
+                    if mid > msg_marker:
+                        msg_marker = mid
+                for aid, typ, path, summary in pending_arts:
                     text = (summary or path or "").strip()
                     if not text:
                         continue
                     vec = cheap_embed([text])[0]
                     _upsert(conn, "artifact", "artifacts", aid, vec)
                     count += 1
+                    if aid > art_marker:
+                        art_marker = aid
+                if msg_marker != last_msg_marker:
+                    _store_marker(conn, "vectors:last_message_id", msg_marker)
+                if art_marker != last_art_marker:
+                    _store_marker(conn, "vectors:last_artifact_id", art_marker)
         return count
 
     def search(self, query: str, *, k: int = 5) -> List[Dict[str, Any]]:
@@ -282,15 +293,79 @@ class LettaBackend(GraphMemoryBackend):
 
 # ---------------------------------------------------------------------------- utils
 
-def _existing_ids(conn, kind: str, table: str) -> set[int]:
-    try:
-        rows = conn.execute(
-            "SELECT ref_id FROM vectors WHERE kind=? AND ref_table=?",
-            (kind, table),
+def _pending_rows(
+    conn,
+    *,
+    table: str,
+    column_list: str,
+    kind: str,
+    last_marker: int,
+):
+    params: Tuple[Any, ...] = ()
+    query = f"SELECT {column_list} FROM {table}"
+    if last_marker:
+        query += " WHERE id > ?"
+        params = (last_marker,)
+    query += " ORDER BY id ASC"
+    fresh = conn.execute(query, params).fetchall()
+
+    missing = []
+    if last_marker:
+        missing = conn.execute(
+            f"""
+            SELECT {column_list}
+            FROM {table} src
+            WHERE src.id <= ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM vectors v
+                  WHERE v.kind=? AND v.ref_table=? AND v.ref_id = src.id
+              )
+            ORDER BY src.id ASC
+            """,
+            (last_marker, kind, table),
         ).fetchall()
+    return missing, fresh
+
+
+def _merge_rows(*groups: Iterable[Tuple[Any, ...]]) -> List[Tuple[Any, ...]]:
+    combined: Dict[int, Tuple[Any, ...]] = {}
+    for group in groups:
+        for row in group or []:
+            if not row:
+                continue
+            try:
+                key = int(row[0])
+            except (TypeError, ValueError):
+                continue
+            combined[key] = row
+    return [combined[key] for key in sorted(combined)]
+
+
+def _load_marker(conn, key: str) -> int:
+    try:
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key=?",
+            (key,),
+        ).fetchone()
     except Exception:
-        return set()
-    return {int(r[0]) for r in rows}
+        return 0
+    if not row or row[0] is None:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
+
+
+def _store_marker(conn, key: str, value: int) -> None:
+    conn.execute(
+        """
+        INSERT INTO schema_meta (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (key, str(int(value))),
+    )
 
 
 def _upsert(conn, kind: str, table: str, ref_id: int, vec: Iterable[float]) -> None:

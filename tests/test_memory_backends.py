@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from symbiont.memory.backends import Mem0Backend, LettaBackend
+from symbiont.memory.backends import GraphMemoryBackend, Mem0Backend, LettaBackend
 from symbiont.memory.db import MemoryDB
 
 
@@ -146,3 +146,45 @@ def test_letta_backend_fallback(monkeypatch, tmp_path: Path, temp_db: MemoryDB):
 
     backend.save_session_state("cycle-2", {"progress": 0.9})
     assert backend.load_session_state("cycle-2") == {"progress": 0.9}
+
+
+def test_graph_backend_incremental_indexing(tmp_path: Path):
+    db_path = tmp_path / "sym.db"
+    db = MemoryDB(db_path=str(db_path))
+    db.ensure_schema()
+    backend = GraphMemoryBackend(db)
+
+    db.add_message("user", "hello")
+    db.add_message("assistant", "world")
+    art_id = db.add_artifact(task_id=None, kind="note", path="notes.md", summary="initial summary")
+
+    first_count = backend.build_indices()
+    with db._conn() as conn:
+        vector_rows = conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+    assert first_count == vector_rows == 3
+
+    db.add_message("user", "new input")
+    second_count = backend.build_indices()
+    assert second_count == 1
+
+    # Simulate a missing embedding that should be backfilled on the next build.
+    with db._conn() as conn:
+        conn.execute(
+            "DELETE FROM vectors WHERE kind='artifact' AND ref_table='artifacts' AND ref_id=?",
+            (art_id,),
+        )
+    backfill_count = backend.build_indices()
+    assert backfill_count == 1
+
+    # Add multiple new messages and cap indexing to force backlog handling.
+    db.add_message("assistant", "later one")
+    db.add_message("user", "later two")
+    limited_count = backend.build_indices(limit_if_new=1)
+    assert limited_count == 1
+
+    final_count = backend.build_indices()
+    assert final_count == 1
+    with db._conn() as conn:
+        total_vectors = conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+    # All five messages plus one artifact should now be embedded.
+    assert total_vectors == 6
