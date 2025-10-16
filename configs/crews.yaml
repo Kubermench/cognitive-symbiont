@@ -124,6 +124,122 @@ agents:
       hybrid_threshold_tokens: 400
     cache: in_memory
     tools: []
+  loop_mapper_agent:
+    role: loop_mapper
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: [repo_scan]
+  leverage_ranker_agent:
+    role: leverage_ranker
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  cynefin_classifier_agent:
+    role: cynefin_classifier
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  cynefin_planner_agent:
+    role: cynefin_planner
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  model_challenger_agent:
+    role: model_challenger
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  success_miner_agent:
+    role: success_miner
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  coupling_analyzer_agent:
+    role: coupling_analyzer
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: local
+    cache: in_memory
+    tools: []
+  flow_analyzer_agent:
+    role: flow_analyzer
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  foresight_scout_agent:
+    role: foresight_scout
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  foresight_analyzer_agent:
+    role: foresight_analyzer
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  foresight_suggester_agent:
+    role: foresight_suggester
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  foresight_validator_agent:
+    role: foresight_validator
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+  foresight_evolver_agent:
+    role: foresight_evolver
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
 
 crew:
   quick_fix:
@@ -150,3 +266,30 @@ crew:
       - insight_researcher
       - innovation_specialist
       - judge
+  leverage_scanner:
+    sequence:
+      - loop_mapper_agent
+      - leverage_ranker_agent
+  cynefin_router:
+    sequence:
+      - cynefin_classifier_agent
+      - cynefin_planner_agent
+  model_challenger:
+    sequence:
+      - model_challenger_agent
+  success_miner:
+    sequence:
+      - success_miner_agent
+  coupling_analyzer:
+    sequence:
+      - coupling_analyzer_agent
+  flow_sentinel:
+    sequence:
+      - flow_analyzer_agent
+  foresight_weaver:
+    sequence:
+      - foresight_scout_agent
+      - foresight_analyzer_agent
+      - foresight_suggester_agent
+      - foresight_validator_agent
+      - foresight_evolver_agent

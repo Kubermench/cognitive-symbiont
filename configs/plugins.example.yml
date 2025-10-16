@@ -1,0 +1,13 @@
+# Example plugin manifest for Symbiont's Swarm beta.
+#
+# Copy to configs/plugins.yml and tailor to your environment.
+
+plugins:
+  - name: sample_local_analyzer
+    module: symbiont.plugins.sample
+    attribute: build_plugin
+    description: Demo plugin that returns a callable crew.
+    enabled: false
+    tags: ["demo", "local"]
+    config:
+      greeting: "hello beta"

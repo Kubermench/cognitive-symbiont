@@ -1,0 +1,19 @@
+# Example crew definition with agents and sequences.
+agents:
+  scout:
+    role: scout
+    llm:
+      provider: ollama
+      model: phi3:mini
+  architect:
+    role: architect
+    tools: ["filesystem"]
+  critic:
+    role: critic
+    cache: in_memory
+crews:
+  default:
+    sequence:
+      - scout
+      - architect
+      - critic

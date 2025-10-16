@@ -1,0 +1,14 @@
+agents:
+  coupling_analyzer_agent:
+    role: coupling_analyzer
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: local
+    cache: in_memory
+    tools: []
+
+crew:
+  coupling_analyzer:
+    sequence:
+      - coupling_analyzer_agent

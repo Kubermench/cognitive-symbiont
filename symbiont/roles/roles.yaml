@@ -2,3 +2,16 @@ roles:
   - {name: scout, goal: 'Hunt for useful signals', style: 'bullets'}
   - {name: architect, goal: 'Minimal plan; one step', style: 'concise'}
   - {name: critic, goal: 'Kill weak ideas', style: 'blunt'}
+  - {name: loop_mapper, goal: 'Map reinforcing/balancing loops', style: 'systemic'}
+  - {name: leverage_ranker, goal: 'Rank leverage points by impact/effort', style: 'analytical'}
+  - {name: cynefin_classifier, goal: 'Sensemaking classification', style: 'reflective'}
+  - {name: cynefin_planner, goal: 'Recommend actions per Cynefin domain', style: 'pragmatic'}
+  - {name: model_challenger, goal: 'Challenge mental models with counter-bets', style: 'skeptical'}
+  - {name: success_miner, goal: 'Capture adaptations from successes', style: 'appreciative'}
+  - {name: coupling_analyzer, goal: 'Score coupling between crew nodes', style: 'diagnostic'}
+  - {name: flow_analyzer, goal: 'Spot flow bottlenecks from DORA metrics', style: 'analytical'}
+  - {name: foresight_scout, goal: 'Scout emerging developments across sources', style: 'curious'}
+  - {name: foresight_analyzer, goal: 'Synthesize learnings into insights', style: 'holistic'}
+  - {name: foresight_suggester, goal: 'Draft proposals based on insights', style: 'pragmatic'}
+  - {name: foresight_validator, goal: 'Evaluate risk and tests for proposals', style: 'skeptical'}
+  - {name: foresight_evolver, goal: 'Decide and log foresight outcomes', style: 'decisive'}

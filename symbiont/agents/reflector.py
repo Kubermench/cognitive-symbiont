@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from ..tools.files import ensure_dirs
 from .mutation import MutationEngine, MutationIntent
+from .meta_learner import MetaLearner
 
 
 STATE_FILE = Path("data/evolution/state.json")
@@ -19,6 +20,7 @@ class CycleSnapshot:
     action: str
     bullets: List[str]
     timestamp: int
+    reward: float
 
 
 class CycleReflector:
@@ -30,6 +32,7 @@ class CycleReflector:
         ensure_dirs([STATE_FILE.parent])
         self._state = self._load_state()
         self.mutation_engine = MutationEngine(config=self.config)
+        self.meta_learner = MetaLearner((self.config or {}).get("evolution"))
 
     # ------------------------------------------------------------------
     def observe_cycle(self, result: Dict[str, Any]) -> None:
@@ -40,14 +43,17 @@ class CycleReflector:
         episode_id = int(result.get("episode_id", 0) or 0)
         decision = (result.get("decision") or {}).get("action", "")
         bullets = self._extract_bullets(result.get("trace", []))
+        reward = float(result.get("reward", 0.0) or 0.0)
 
         snapshot = CycleSnapshot(
             episode_id=episode_id,
             action=decision,
             bullets=bullets,
             timestamp=int(time.time()),
+            reward=reward,
         )
         self._record_snapshot(snapshot)
+        self.meta_learner.observe(self._state, snapshot)
 
         intent = self._evaluate(snapshot)
         if intent:
@@ -68,6 +74,7 @@ class CycleReflector:
             "action": snapshot.action,
             "bullets": snapshot.bullets,
             "ts": snapshot.timestamp,
+            "reward": snapshot.reward,
         })
         # Keep the tail small to avoid bloat
         if len(history) > 25:
@@ -76,8 +83,9 @@ class CycleReflector:
     def _evaluate(self, snapshot: CycleSnapshot) -> Optional[MutationIntent]:
         history = self._state.get("history", [])
         drift_cfg = (self.config or {}).get("evolution", {})
-        min_repeats = int(drift_cfg.get("repeat_threshold", 3))
-        empty_limit = int(drift_cfg.get("empty_bullet_threshold", 2))
+        overrides = self._state.get("meta_adjustments", {})
+        min_repeats = int(overrides.get("repeat_threshold", drift_cfg.get("repeat_threshold", 3)))
+        empty_limit = int(overrides.get("empty_bullet_threshold", drift_cfg.get("empty_bullet_threshold", 2)))
 
         # 1) repeated actions -> ask planner to diversify suggestions
         if snapshot.action:
@@ -121,4 +129,3 @@ class CycleReflector:
             STATE_FILE.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
         except Exception:
             pass
-

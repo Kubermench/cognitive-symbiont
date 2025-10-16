@@ -10,12 +10,15 @@ prompt.
 from __future__ import annotations
 
 import math
+import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List
 
 import numpy as np
+
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 
 @dataclass
@@ -124,27 +127,40 @@ def _render_plot(
     config: HybridABMConfig,
 ) -> str | None:
     try:
+        import matplotlib
+        try:
+            backend = matplotlib.get_backend()
+        except Exception:
+            backend = None
+        if not backend or not str(backend).lower().startswith("agg"):
+            matplotlib.use("Agg")  # type: ignore[arg-type]
         import matplotlib.pyplot as plt
     except Exception:
         return None
 
     config.plot_dir.mkdir(parents=True, exist_ok=True)
     times = list(range(len(base_states)))
-    plt.figure(figsize=(6, 4))
-    for key in base_states[0].keys():
-        original = [state.get(key, math.nan) for state in base_states]
-        noisy = [point.get(key, math.nan) for point in perturbed]
-        plt.plot(times, original, label=f"{key} (macro)")
-        plt.plot(times, noisy, linestyle="--", label=f"{key} (abm)")
-    plt.xlabel("Time")
-    plt.ylabel("Value")
-    plt.title("Hybrid SD + ABM projection")
-    plt.legend()
-    path = config.plot_dir / "abm_projection.png"
-    plt.tight_layout()
-    plt.savefig(path)
-    plt.close()
-    return str(path)
+    fig = None
+    try:
+        fig = plt.figure(figsize=(6, 4))
+        for key in base_states[0].keys():
+            original = [state.get(key, math.nan) for state in base_states]
+            noisy = [point.get(key, math.nan) for point in perturbed]
+            plt.plot(times, original, label=f"{key} (macro)")
+            plt.plot(times, noisy, linestyle="--", label=f"{key} (abm)")
+        plt.xlabel("Time")
+        plt.ylabel("Value")
+        plt.title("Hybrid SD + ABM projection")
+        plt.legend()
+        path = config.plot_dir / "abm_projection.png"
+        plt.tight_layout()
+        plt.savefig(path, dpi=150)
+        return str(path)
+    except Exception:
+        return None
+    finally:
+        if fig is not None:
+            plt.close(fig)
 
 
 def _clamp(value: float) -> float:

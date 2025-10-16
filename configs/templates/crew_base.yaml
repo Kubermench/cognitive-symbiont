@@ -1,0 +1,28 @@
+agents:
+  scout:
+    role: scout
+    llm:
+      provider: ollama
+      model: phi3:mini
+    cache: in_memory
+    tools: []
+  architect:
+    role: architect
+    llm:
+      provider: ollama
+      model: phi3:mini
+    cache: in_memory
+    tools: []
+  critic:
+    role: critic
+    llm:
+      provider: ollama
+      model: phi3:mini
+    cache: in_memory
+    tools: []
+crew:
+  default:
+    sequence:
+      - scout
+      - architect
+      - critic

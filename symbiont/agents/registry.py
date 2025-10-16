@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -13,7 +14,9 @@ from .subself import SubSelf
 from ..llm.client import LLMClient
 from ..llm.budget import TokenBudget
 from ..memory.db import MemoryDB
-from ..tools import scriptify
+from ..memory.embedder import cheap_embed
+from ..tools import scriptify, systems_os
+from ..orchestration.schema import CrewFileModel
 
 logger = logging.getLogger(__name__)
 
@@ -121,22 +124,22 @@ class AgentRegistry:
 
     @classmethod
     def from_yaml(cls, path: Path) -> "AgentRegistry":
-        data = yaml.safe_load(path.read_text()) or {}
-        agents_data = data.get("agents", {})
-        crews_data = data.get("crew", {}) or data.get("crews", {})
+        raw = yaml.safe_load(path.read_text()) or {}
+        model = CrewFileModel.model_validate(raw)
+        agents_data = model.agents
+        crews_data = model.resolved_crews()
         agents: Dict[str, AgentSpec] = {}
         for name, spec in agents_data.items():
             agents[name] = AgentSpec(
                 name=name,
-                role=spec.get("role", name),
-                llm=spec.get("llm", {}),
-                cache=spec.get("cache"),
-                tools=spec.get("tools", []),
+                role=spec.role,
+                llm=spec.llm,
+                cache=spec.cache,
+                tools=spec.tools,
             )
         crews: Dict[str, CrewSpec] = {}
         for name, spec in crews_data.items():
-            seq = spec.get("sequence") or spec.get("roles") or []
-            crews[name] = CrewSpec(name=name, sequence=seq)
+            crews[name] = CrewSpec(name=name, sequence=spec.resolved_sequence())
         return cls(agents, crews)
 
     def get_agent(self, name: str) -> AgentSpec:
@@ -159,6 +162,7 @@ class CrewRunner:
         self.script_dir.mkdir(parents=True, exist_ok=True)
         self.crew_artifacts = Path("data/artifacts/crews")
         self.crew_artifacts.mkdir(parents=True, exist_ok=True)
+        self.last_context: Dict[str, Any] = {}
 
     def run(self, crew_name: str, goal: str) -> Path:
         crew = self.registry.get_crew(crew_name)
@@ -194,6 +198,8 @@ class CrewRunner:
             )
             result = agent.run(context, memory_conn)
             outputs.append({"agent": agent_id, "result": result})
+            context_key = f"result:{agent_spec.role}"
+            context[context_key] = result
             if agent_spec.role == "architect":
                 latest_bullets = result.get("bullets", [])
             if agent_spec.role == "executor":
@@ -204,9 +210,104 @@ class CrewRunner:
                     episode_id=context.get("episode_id"),
                 )
                 outputs.append({"agent": agent_id, "script": script_path})
+            if agent_spec.role == "loop_mapper":
+                context["systems_loops"] = result.get("loops", [])
+            if agent_spec.role == "leverage_ranker":
+                context["leverage_points"] = result.get("leverage_points", [])
+            if agent_spec.role == "cynefin_classifier":
+                context["cynefin_domain"] = result.get("domain")
+                context["cynefin_reason"] = result.get("reason")
+                context["cynefin_signals"] = result.get("signals", [])
+            if agent_spec.role == "cynefin_planner":
+                context["cynefin_rule"] = result.get("rule")
+                context["cynefin_actions"] = result.get("actions", [])
+                context["cynefin_probes"] = result.get("probes", [])
+            if agent_spec.role == "model_challenger":
+                context["mental_model"] = {
+                    "model": result.get("model"),
+                    "counter_bet": result.get("counter_bet"),
+                    "experiment": result.get("experiment"),
+                    "signal": result.get("signal"),
+                }
+            if agent_spec.role == "success_miner":
+                context["safety_entry"] = result
+            if agent_spec.role == "coupling_analyzer":
+                context["coupling_entries"] = result.get("entries", [])
+                context["coupling_heat"] = result.get("heat", 0.0)
 
         artifact_path = self._persist_outputs(crew_name, goal, outputs)
+        self.last_context = context
+        self._post_process(crew_name, context)
         return artifact_path
+
+    def _store_artifact(self, artifact_type: str, path: Path, summary: str) -> None:
+        summary_text = (summary or "").strip() or path.name
+        with self.db._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO artifacts (task_id, type, path, summary, created_at) VALUES (?,?,?,?,strftime('%s','now'))",
+                (None, artifact_type, str(path), summary_text[:240]),
+            )
+            artifact_id = cur.lastrowid
+            embedding = cheap_embed([summary_text])[0]
+            conn.execute(
+                "INSERT INTO vectors (kind, ref_table, ref_id, embedding) VALUES (?, ?, ?, ?)",
+                ("artifact", "artifacts", artifact_id, json.dumps(embedding)),
+            )
+
+    def _record_foresight_artifacts(self, context: Dict[str, Any]) -> None:
+        sources = context.get("foresight_sources")
+        if not isinstance(sources, dict):
+            return
+        meta = sources.get("meta")
+        if not isinstance(meta, dict) or not meta:
+            return
+
+        topic = sources.get("topic") or context.get("goal") or "foresight"
+        meta_dir = Path("data/artifacts/foresight/meta")
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc)
+        plot_path = meta.get("source_plot") if isinstance(meta.get("source_plot"), str) else None
+        if plot_path:
+            meta["source_plot"] = str(Path(plot_path))
+
+        meta_payload = {
+            "timestamp": timestamp.isoformat(),
+            "topic": topic,
+            "goal": context.get("goal"),
+            "meta": meta,
+        }
+        meta_path = meta_dir / f"{timestamp.strftime('%Y%m%d%H%M%S')}_meta.json"
+        meta_path.write_text(json.dumps(meta_payload, indent=2), encoding="utf-8")
+
+        breakdown = meta.get("source_breakdown") if isinstance(meta.get("source_breakdown"), dict) else {}
+        summary_parts = [
+            f"topic={topic}",
+            f"total={meta.get('total_candidates', 0)}",
+            f"dropped={meta.get('dropped_low_score', 0)}",
+        ]
+        if meta.get("token_delta") is not None:
+            summary_parts.append(f"tokens={meta.get('token_delta')}")
+        if meta.get("cost_estimate") is not None:
+            summary_parts.append(f"cost={meta.get('cost_estimate')}")
+        if breakdown:
+            summary_parts.append(
+                "sources="
+                + ",".join(f"{src}:{info.get('count', 0)}" for src, info in breakdown.items())
+            )
+        summary = " ".join(summary_parts)
+        self._store_artifact("foresight_meta", meta_path, summary)
+
+        plot_path = meta.get("source_plot")
+        if isinstance(plot_path, str) and plot_path:
+            plot_file = Path(plot_path)
+            if not plot_file.is_absolute():
+                plot_file = Path(plot_path)
+            if plot_file.exists():
+                self._store_artifact(
+                    "foresight_plot",
+                    plot_file,
+                    f"Source mix chart for {topic}",
+                )
 
     def _persist_outputs(self, crew_name: str, goal: str, outputs: list[dict[str, Any]]) -> Path:
         import time
@@ -223,3 +324,85 @@ class CrewRunner:
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path
+
+    def _post_process(self, crew_name: str, context: Dict[str, Any]) -> None:
+        if crew_name == "leverage_scanner":
+            loops = context.get("systems_loops", [])
+            leverage = context.get("leverage_points", [])
+            if loops:
+                rows = []
+                for loop in loops:
+                    rows.append(
+                        "| {date} | {name} | {type} | {stocks} | {flows} | {note} |".format(
+                            date=__import__("datetime").datetime.utcnow().strftime("%Y-%m-%d"),
+                            name=loop.get("name", "Unnamed"),
+                            type=loop.get("type", "unknown"),
+                            stocks=", ".join(loop.get("stocks", []))[:60],
+                            flows=", ".join(loop.get("flows", []))[:60],
+                            note=loop.get("note", "")[:80],
+                        )
+                    )
+                systems_os.append_markdown("Loops.md", rows)
+            if leverage:
+                rows = []
+                for idx, point in enumerate(leverage, start=1):
+                    rows.append(
+                        "| {rank} | {name} | {effort:.2f} | {impact:.2f} | {note} |".format(
+                            rank=idx,
+                            name=point.get("name", "Leverage"),
+                            effort=point.get("effort", 0.0),
+                            impact=point.get("impact", 0.0),
+                            note=point.get("description", "")[:80],
+                        )
+                    )
+                systems_os.append_markdown("LeverageList.md", rows)
+        if crew_name == "cynefin_router":
+            domain = context.get("cynefin_domain", "disorder")
+            rule = context.get("cynefin_rule", "Assess further")
+            signals = context.get("cynefin_signals", [])
+            actions = context.get("cynefin_actions", [])
+            row = "| {domain} | {reason} | {signals} | {rule} |".format(
+                domain=domain.capitalize(),
+                reason=context.get("cynefin_reason", "")[:80],
+                signals=", ".join(signals)[:80],
+                rule=rule[:80],
+            )
+            systems_os.append_markdown("Cynefin.md", [row])
+        if crew_name == "model_challenger":
+            mm = context.get("mental_model") or {}
+            row = "| {date} | {model} | {counter} | {experiment} | pending |".format(
+                date=__import__("datetime").datetime.utcnow().strftime("%Y-%m-%d"),
+                model=(mm.get("model") or "").replace("|", " ")[:60],
+                counter=(mm.get("counter_bet") or "").replace("|", " ")[:60],
+                experiment=(mm.get("experiment") or "").replace("|", " ")[:60],
+            )
+            systems_os.append_markdown("MentalModels.md", [row])
+        if crew_name == "success_miner":
+            entry = context.get("safety_entry") or {}
+            text = (
+                f"## {__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d')}\n"
+                f"What went right: {entry.get('what_went_right', '')}\n"
+                f"Adaptations: {entry.get('adaptations', '')}\n"
+                f"Signals: {entry.get('signals', '')}\n"
+                f"Next step: {entry.get('next_step', '')}\n"
+            )
+            systems_os.append_success_entry(text)
+        if crew_name == "coupling_analyzer":
+            entries = context.get("coupling_entries", [])
+            if entries:
+                systems_os.write_coupling_map(entries)
+        if crew_name == "foresight_weaver":
+            sources = context.get("foresight_sources") or {}
+            analysis = context.get("foresight_analysis") or {}
+            proposal = (context.get("foresight_proposal") or {}).get("proposal", "")
+            result = context.get("foresight_result") or {}
+            approval = "yes" if result.get("approved") else f"no (risk {result.get('validation', {}).get('risk', 'n/a')})"
+            row = "| {date} | {topic} | {highlight} | {proposal} | {approval} |".format(
+                date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                topic=str(sources.get("topic", "n/a"))[:40],
+                highlight=str(analysis.get("highlight", ""))[:60],
+                proposal=str(proposal)[:60],
+                approval=approval[:40],
+            )
+            systems_os.append_markdown("Foresight.md", [row])
+            self._record_foresight_artifacts(context)

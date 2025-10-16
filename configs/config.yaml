@@ -1,12 +1,28 @@
 db_path: ./data/symbiont.db
 env: dev
 max_tokens: 6000
+memory:
+  layer: local  # local | mem0 | letta
+  mem0:
+    api_key_env: MEM0_API_KEY
+    host: null
+    org_id: null
+    project_id: null
+    preferences_user_id_env: MEM0_USER_ID
+    session_user_id_env: MEM0_SESSION_USER
+  letta:
+    token_env: LETTA_API_TOKEN  # or LETTA_TOKEN
+    project: null
+    base_url: null
+    session_label: symbiont_session_state
+    preference_label: symbiont_user_preferences
+    user_id_env: LETTA_USER_ID
 cycle_budget_seconds: 60
 consensus:
   min_agree: 2
   require_critic_ok: true
 initiative:
-  enabled: false
+  enabled: true
   repo_path: .
   watchers:
   - file
@@ -18,11 +34,41 @@ initiative:
   goal_template: Repo idle; propose one 10-minute refactor and draft a script.
   watch_config_path: ./configs/watch_targets.yaml
   autonomy_mode: guarded
+  state:
+    backend: sqlite
+    path: ./data/initiative/state.db
+    swarm_ttl_seconds: 600
   pubsub:
-    enabled: false
+    enabled: true
     backend: memory  # memory | redis
     channel: symbiont:initiative
     log_path: ./data/initiative/events.jsonl
+foresight:
+  enabled: true
+  crew: foresight_weaver
+  goal: Emerging agentic AI trends
+  crew_config: ./configs/crews/foresight_weaver.yaml
+  timer_minutes: 1440
+  idle_minutes: 240
+  min_timer_minutes: 120
+  min_idle_minutes: 60
+  relevance_thresholds:
+    high: 1.5
+    medium: 1.0
+  trigger_mode: any
+  collaboration:
+    enabled: true
+    models:
+      - grok
+      - devin
+    max_items: 2
+    llm_override: {}
+retrieval:
+  external:
+    enabled: false
+    max_items: 6
+    min_relevance: 0.7
+    log: true
 evolution:
   enabled: true
   repeat_threshold: 3
@@ -76,6 +122,9 @@ voice:
   stt: none
   tts: say
   wake_word: symbiont
+sources:
+  limits:
+    arxiv: 30
 guard:
   auto_approve_safe: false
   judge:

@@ -1,0 +1,16 @@
+# Example graph configuration for Symbiont crews.
+crew_config: ./crew_template.yaml
+graph:
+  start: scout
+  nodes:
+    scout:
+      agent: scout
+      next: architect
+    architect:
+      agent: architect
+      on_success: critic
+      on_failure: scout
+    critic:
+      agent: critic
+      on_success: null
+  parallel: []

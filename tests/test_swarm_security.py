@@ -15,7 +15,10 @@ from symbiont.ports.ai_peer import PeerTranscript
 def test_swarm_score_variants_assigns_agent_ids(tmp_path, monkeypatch):
     cfg = {
         "db_path": str(tmp_path / "sym.db"),
-        "initiative": {"repo_path": str(tmp_path)},
+        "initiative": {
+            "repo_path": str(tmp_path),
+            "state": {"backend": "sqlite", "path": str(tmp_path / "state.db")},
+        },
         "evolution": {"swarm_enabled": True},
         "ports": {"ai_peer": {"stub_mode": True}},
     }

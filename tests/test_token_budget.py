@@ -69,3 +69,53 @@ def test_token_budget_history(tmp_path):
     assert history.exists()
     lines = [json.loads(line) for line in history.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert lines and lines[0]["label"] == "hist"
+
+
+def test_token_budget_trims_event_buffer():
+    budget = TokenBudget(limit=0, label="trim")
+    for idx in range(250):
+        budget.log_attempt(
+            prompt_tokens=2,
+            response_tokens=1,
+            provider="ollama",
+            model="phi3:mini",
+            label="trim",
+            source=f"unit-{idx}",
+            outcome="ok",
+            latency=0.01,
+        )
+
+    assert len(budget.events) == 200
+    # Oldest events fall off the buffer
+    assert budget.events[0]["source"] == "unit-50"
+    assert budget.used == 750
+
+
+def test_token_budget_snapshot_throttle(tmp_path, monkeypatch):
+    sink = tmp_path / "snap.json"
+    budget = TokenBudget(limit=0, label="snap", sink_path=sink)
+
+    write_calls = {"count": 0}
+    original_write = Path.write_text
+
+    def fake_write(self, *args, **kwargs):
+        if self == sink:
+            write_calls["count"] += 1
+        return original_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fake_write, raising=False)
+    monkeypatch.setattr("symbiont.llm.budget.time.monotonic", lambda: 0.0)
+
+    for idx in range(5):
+        budget.log_attempt(
+            prompt_tokens=1,
+            response_tokens=1,
+            provider="ollama",
+            model="phi3:mini",
+            label="snap",
+            source=f"throttle-{idx}",
+            outcome="ok",
+            latency=0.01,
+        )
+
+    assert write_calls["count"] == 1

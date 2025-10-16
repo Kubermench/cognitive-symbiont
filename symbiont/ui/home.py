@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, json, sqlite3, time, threading
+import os, json, sqlite3, time, threading, statistics
 from pathlib import Path
 import streamlit as st
 from symbiont.memory.db import MemoryDB
@@ -134,15 +134,35 @@ def _load_budget_history(history_path: Path) -> list[dict[str, Any]]:
                     continue
                 try:
                     rows.append(json.loads(line))
-                except Exception:
-                    continue
+        except Exception:
+            continue
     except Exception:
         return []
     return rows
 
 
+def _build_budget_chart(rows: list[dict[str, Any]]) -> dict[str, list[float]]:
+    if not rows:
+        return {}
+    rows_sorted = sorted(rows, key=lambda r: r.get("ts", 0))
+    labels = sorted({row.get("label") for row in rows_sorted if row.get("label")})
+    if not labels:
+        return {}
+    cumulative = {label: 0.0 for label in labels}
+    series = {label: [] for label in labels}
+    for row in rows_sorted:
+        label = row.get("label")
+        if label not in cumulative:
+            continue
+        tokens = float(row.get("prompt_tokens", 0) or 0) + float(row.get("response_tokens", 0) or 0)
+        cumulative[label] += tokens
+        for lbl in labels:
+            series[lbl].append(cumulative[lbl])
+    return series
+
+
 def render_home(cfg: dict, db: MemoryDB):
-    st.title("🧠 Cognitive Symbiont — Homebase (v2.4)")
+    st.title("🧠 Cognitive Symbiont — Homebase (v3.6)")
     st.autorefresh(interval=15000, key="home_autorefresh")
     st.markdown(
         "Welcome! Symbiont drafts small, reviewable changes for you. **You stay in control**—every script pauses for approval and every step is logged so you can undo it later."
@@ -175,7 +195,7 @@ def render_home(cfg: dict, db: MemoryDB):
             repostat = f"{'🟢' if det['git'] else '⚪️'} git · {'🟢' if det['python'] else '⚪️'} python · {'🟢' if det['node'] else '⚪️'} node · {'🟢' if det['editorconfig'] else '🔴'} editorconfig"
             st.markdown(f"**Repo**: {repostat}")
         with cols[1]:
-            stt = initiative.get_status()
+            stt = initiative.get_status(cfg)
             st.markdown(f"**Initiative**: {'🟢 running' if stt.get('daemon_running') else '⚪️ stopped'} · last prop {_rel(stt.get('last_proposal_ts',0))}")
         with cols[2]:
             with sqlite3.connect(cfg["db_path"]) as c:
@@ -195,6 +215,14 @@ def render_home(cfg: dict, db: MemoryDB):
             st.subheader("Governance forecast")
             st.caption(
                 f"Baseline rogue score {snapshot['rogue_baseline']:.2f}; forecasting {len(snapshot['rogue_forecast'])} future cycles from {graph_path.name}."
+            )
+            metrics_cols = st.columns(2)
+            metrics_cols[0].metric("Rogue baseline", f"{snapshot['rogue_baseline']:.2f}")
+            forecast_max = max(snapshot.get("rogue_forecast", [snapshot['rogue_baseline']]) or [snapshot['rogue_baseline']])
+            metrics_cols[1].metric(
+                "Forecast max",
+                f"{forecast_max:.2f}",
+                delta=f"threshold {snapshot['alert_threshold']:.2f}",
             )
             if snapshot.get("alert"):
                 st.warning(
@@ -243,51 +271,83 @@ def render_home(cfg: dict, db: MemoryDB):
 
         token_dir = data_root / "token_budget"
         if token_dir.exists():
-            snapshots = []
+            snapshots = {}
             for path in sorted(token_dir.glob("*.json")):
                 try:
-                    snapshots.append(json.loads(path.read_text(encoding="utf-8")))
+                    payload = json.loads(path.read_text(encoding="utf-8"))
                 except Exception:
                     continue
+                label = payload.get("label") or path.stem
+                snapshots[label] = payload
             if snapshots:
-                latest = {snap.get("label", path.stem): snap for snap in snapshots}
-                total_limit = sum(snap.get("limit", 0) or 0 for snap in latest.values())
-                total_used = sum(snap.get("used", 0) or 0 for snap in latest.values())
-                st.markdown(
-                    f"**Token budgets:** used {total_used} / {total_limit or '∞'} across {len(latest)} trackers"
+                total_limit = sum(float(snap.get("limit", 0) or 0) for snap in snapshots.values())
+                total_used = sum(float(snap.get("used", 0) or 0) for snap in snapshots.values())
+                st.subheader("Token budgets")
+                st.caption(
+                    f"Used {total_used:.0f} tokens across {len(snapshots)} trackers (limit {total_limit or '∞'})"
                 )
-                history_rows = _load_budget_history(token_dir / "history.jsonl")
-                if history_rows:
-                    try:
-                        import pandas as pd  # type: ignore
 
-                        df = pd.DataFrame(history_rows)
-                        if not df.empty:
-                            df["tokens"] = df.get("prompt_tokens", 0).fillna(0) + df.get("response_tokens", 0).fillna(0)
-                            df = df.sort_values("ts")
-                            df["ts"] = pd.to_datetime(df["ts"], unit="s")
-                            chart = df.pivot_table(index="ts", columns="label", values="tokens", aggfunc="sum").fillna(0)
-                            chart = chart.cumsum()
-                            st.line_chart(chart)
-                            st.dataframe(df.tail(20)[["ts", "label", "tokens", "outcome"]].rename(columns={"ts": "timestamp", "tokens": "Δtokens"}))
-                    except Exception:
-                        # Fall back to manual aggregation
-                        history_rows = sorted(history_rows, key=lambda r: r.get("ts", 0))
-                        bucket: dict[str, int] = {}
-                        for row in history_rows:
-                            label = row.get("label", "unknown")
-                            delta = int(row.get("prompt_tokens", 0) or 0) + int(row.get("response_tokens", 0) or 0)
-                            bucket[label] = bucket.get(label, 0) + delta
-                        if bucket:
-                            st.json(bucket)
+                history_rows = _load_budget_history(token_dir / "history.jsonl")
+                latency_map: dict[str, float] = {}
+                if history_rows:
+                    latencies: dict[str, list[float]] = {}
+                    for row in history_rows:
+                        label = row.get("label")
+                        latency = row.get("latency_seconds")
+                        if not label or latency is None:
+                            continue
+                        try:
+                            latencies.setdefault(label, []).append(float(latency))
+                        except (TypeError, ValueError):
+                            continue
+                    for label, values in latencies.items():
+                        if values:
+                            latency_map[label] = statistics.mean(values)
+
+                gauge_columns = st.columns(min(3, len(snapshots)))
+                alert_labels = []
+                for idx, (label, payload) in enumerate(sorted(snapshots.items())):
+                    used = float(payload.get("used", 0) or 0)
+                    limit = float(payload.get("limit", 0) or 0)
+                    ratio = (used / limit) if limit else None
+                    col = gauge_columns[idx % len(gauge_columns)]
+                    col.metric(f"{label}", f"{used:.0f}", delta=f"limit {limit:.0f}" if limit else None)
+                    if limit:
+                        col.progress(min(1.0, used / limit), text=f"{used:.0f}/{limit:.0f} tokens")
+                    if label in latency_map:
+                        col.caption(f"avg latency {latency_map[label]:.2f}s")
+                    if ratio is not None and ratio >= 0.8:
+                        alert_labels.append((label, ratio))
+
+                if alert_labels:
+                    alerts = ", ".join(f"{label}: {ratio:.0%}" for label, ratio in alert_labels)
+                    st.warning(f"Usage nearing limits — {alerts}", icon="⚠️")
+
+                chart_series = _build_budget_chart(history_rows)
+                if chart_series:
+                    st.line_chart(chart_series, height=220)
+                if history_rows:
+                    with st.expander("Recent token events", expanded=False):
+                        preview = [
+                            {
+                                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(event.get("ts", 0))),
+                                "label": event.get("label"),
+                                "tokens": (event.get("prompt_tokens", 0) or 0)
+                                + (event.get("response_tokens", 0) or 0),
+                                "latency": round(float(event.get("latency_seconds", 0) or 0), 3),
+                                "outcome": event.get("outcome"),
+                            }
+                            for event in history_rows[-20:]
+                        ]
+                        st.table(preview)
             else:
                 configured_limit = cfg.get("max_tokens")
                 if configured_limit:
-                    st.markdown(f"**Token budget:** limit {configured_limit} (no usage recorded yet)")
+                    st.info(f"Token budget limit {configured_limit} (no usage recorded yet)")
         else:
             configured_limit = cfg.get("max_tokens")
             if configured_limit:
-                st.markdown(f"**Token budget:** limit {configured_limit} (no usage recorded yet)")
+                st.info(f"Token budget limit {configured_limit} (no usage recorded yet)")
         
         paused_states = _paused_graph_states()
         if paused_states:
@@ -867,7 +927,7 @@ def render_home(cfg: dict, db: MemoryDB):
             res = initiative.propose_once(cfg, reason="ui-forced")
             st.success(f"Proposed. Episode {res.get('episode_id')}")
         st.caption("Daemon controls are session-local. Closing this page stops the thread.")
-        status = initiative.get_status()
+        status = initiative.get_status(cfg)
         last_check = (
             time.strftime(
                 "%Y-%m-%d %H:%M:%S", time.localtime(status.get("last_check_ts", 0))
