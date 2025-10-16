@@ -82,13 +82,20 @@ class GraphMemoryBackend:
                 last_marker=last_art_marker,
             )
 
-        if limit_if_new:
-            cap = int(limit_if_new)
-            if cap > 0:
-                fresh_msgs = fresh_msgs[-cap:]
-                fresh_arts = fresh_arts[-cap:]
+        cap = 0
+        if limit_if_new is not None:
+            try:
+                cap = max(0, int(limit_if_new))
+            except (TypeError, ValueError):
+                cap = 0
+        if cap:
+            fresh_msgs = fresh_msgs[-cap:]
+            fresh_arts = fresh_arts[-cap:]
         pending_msgs = _merge_rows(missing_msgs, fresh_msgs)
         pending_arts = _merge_rows(missing_arts, fresh_arts)
+        if cap:
+            pending_msgs = pending_msgs[-cap:]
+            pending_arts = pending_arts[-cap:]
 
         count = 0
         msg_marker = last_msg_marker

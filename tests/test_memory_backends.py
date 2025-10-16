@@ -163,17 +163,30 @@ def test_graph_backend_incremental_indexing(tmp_path: Path):
         vector_rows = conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
     assert first_count == vector_rows == 3
 
+    # Drop existing message vectors to simulate backlog larger than the cap.
+    with db._conn() as conn:
+        conn.execute("DELETE FROM vectors WHERE kind='message'")
+    limited_backfill = backend.build_indices(limit_if_new=1)
+    assert limited_backfill == 1
+    remaining_backfill = backend.build_indices(limit_if_new=1)
+    assert remaining_backfill == 1
+    assert backend.build_indices(limit_if_new=1) == 0
+    with db._conn() as conn:
+        vector_rows = conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+    assert vector_rows == 3
+
     db.add_message("user", "new input")
     second_count = backend.build_indices()
     assert second_count == 1
 
-    # Simulate a missing embedding that should be backfilled on the next build.
+    # Simulate a missing artifact embedding and ensure the capped rebuild only
+    # processes one record per invocation.
     with db._conn() as conn:
         conn.execute(
             "DELETE FROM vectors WHERE kind='artifact' AND ref_table='artifacts' AND ref_id=?",
             (art_id,),
         )
-    backfill_count = backend.build_indices()
+    backfill_count = backend.build_indices(limit_if_new=1)
     assert backfill_count == 1
 
     # Add multiple new messages and cap indexing to force backlog handling.
