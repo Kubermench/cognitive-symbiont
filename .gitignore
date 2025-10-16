@@ -15,6 +15,7 @@ coverage.xml
 
 # Local environments
 .venv/
+.venv311/
 .env
 .DS_Store
 
