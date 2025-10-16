@@ -12,9 +12,10 @@ This bundle includes RAG memory, a local-first LLM adapter, a Streamlit homebase
 ### Quick Start (non-technical friendly)
 1. (Optional) install the CLI locally: `pip install .` then run commands via the new `sym` entry point.
 2. Open a terminal in the project folder and run `streamlit run app.py`.
-2. In the web app, click **Run a cycle**. Symbiont will write a short plan on the left and a matching script on the right.
-3. Read the plan. If it sounds good, press **Run safely (guarded)** → **Confirm**. Symbiont runs the script, saves the log, and shows a success message.
-4. Need a web reference? Use **Settings → Browser → Fetch to notes** and confirm; the note appears in “Sources” for the next plan.
+3. Want a terminal-only smoke test? Run `sym quickstart` to execute a single guarded cycle (external web fetches are skipped by default) and preview the generated plan.
+4. In the web app, click **Run a cycle**. Symbiont will write a short plan on the left and a matching script on the right.
+5. Read the plan. If it sounds good, press **Run safely (guarded)** → **Confirm**. Symbiont runs the script, saves the log, and shows a success message.
+6. Need a web reference? Use **Settings → Browser → Fetch to notes** and confirm; the note appears in “Sources” for the next plan.
 
 Symbiont never changes files until you press **Confirm**, and every action (plans, scripts, logs) is written under `data/artifacts/`.
 
