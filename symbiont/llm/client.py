@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import time
 from typing import Dict, Optional
@@ -47,6 +48,7 @@ class LLMClient:
             float(retry_cfg.get("max_seconds", 20.0) or 20.0),
         )
         self._retry_enabled = bool(retry_cfg.get("enabled", True))
+        self._ollama_available: Optional[bool] = None
 
     def generate(
         self,
@@ -227,7 +229,23 @@ class LLMClient:
             return self._generate_cmd(cmd, prompt, timeout_val)
         return ""
 
+    def _ensure_ollama_available(self) -> bool:
+        if self._ollama_available is not None:
+            return self._ollama_available
+        path = shutil.which("ollama")
+        if not path:
+            logger.warning(
+                "Ollama provider requested but 'ollama' executable is not on PATH; "
+                "returning empty response."
+            )
+            self._ollama_available = False
+            return False
+        self._ollama_available = True
+        return True
+
     def _generate_ollama(self, model: str, prompt: str, timeout: int) -> str:
+        if not self._ensure_ollama_available():
+            return ""
         env = os.environ.copy()
         env.setdefault("OLLAMA_NO_SPINNER", "1")
         # First try piping the prompt via stdin (supported on recent ollama versions)

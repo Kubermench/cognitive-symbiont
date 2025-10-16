@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import time
 import types
@@ -186,6 +187,7 @@ def test_llmclient_generate_ollama(monkeypatch):
         return outputs.pop(0)
 
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/ollama")
     client = LLMClient({"provider": "ollama", "model": "phi3:mini"})
     text = client._generate_ollama("phi3:mini", "prompt", timeout=5)
     assert text == "success"
@@ -259,6 +261,7 @@ def test_llmclient_generate_ollama_exception(monkeypatch):
         return func(*args, **kwargs)
 
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/ollama")
     client = LLMClient({"provider": "ollama", "model": "phi3:mini"})
     assert client._generate_ollama("phi3:mini", "prompt", timeout=5) == ""
 
@@ -290,6 +293,7 @@ def test_llmclient_generate_ollama_direct_success(monkeypatch):
         "subprocess.run",
         lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="direct", stderr=""),
     )
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/ollama")
     client = LLMClient({"provider": "ollama", "model": "phi3:mini"})
     assert client._generate_ollama("phi3:mini", "prompt", timeout=1) == "direct"
 

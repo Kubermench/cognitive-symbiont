@@ -24,7 +24,7 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
 - Rollback: a `rollback_*.sh` script is saved next to `apply_*.sh`.
 
 ### Hybrid LLM setup (optional)
-- Default mode is **local**: Symbiont calls Ollama (e.g., `phi3:mini`).
+- Default mode is **local**: Symbiont calls Ollama (e.g., `phi3:mini`). Make sure the `ollama` binary is installed and on your `PATH`; Symbiont logs a warning and falls back to the secondary provider if it cannot find the CLI.
 - To enable cloud fallback, edit `configs/config.yaml`:
   ```yaml
   llm:
@@ -37,6 +37,7 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
   ```
 - Export your API key (`export OPENAI_API_KEY=sk-…`). Prompts below the threshold run locally; longer ones automatically escalate to the cloud model and fall back to local if the cloud call fails.
 - Set `max_tokens` in `configs/config.yaml` to enforce a shared token budget; orchestration cycles, crew runs, and graph executions will refuse further LLM calls once the budget is exhausted, and paused graphs carry the usage forward when you resume them.
+- **Plugin manifest (Swarm preview)** – Copy `configs/plugins.example.yml` to `configs/plugins.yml` and flip `enabled: true` for entries you want Symbiont to auto-load. Each plugin entry names a Python module and optional callable, letting community crews stay modular without inflating the base install. Override the manifest path via `$SYMBIONT_PLUGINS_FILE` and inspect active entries anytime with `sym plugins-list`.
 - **Crew orchestration (experimental)** – Define agents and crews in `configs/crews.yaml`. Run a crew with `python -m symbiont.cli crew_run quick_fix "Tidy the repo"`. Results land under `data/artifacts/crews/<crew>/crew_<timestamp>.json`; scripts still require approval via the guard dialogs.
 - **Graph workflows (experimental)** – Describe branching workflows in YAML (e.g., `configs/graphs/quick_fix.yaml`) and run them with `python -m symbiont.cli run_graph configs/graphs/quick_fix.yaml "Fix lint"`. If a run pauses, resume via `python -m symbiont.cli graph_resume data/evolution/graph_state_<ts>.json`. Use `graph.parallel` groups to force sequential cohorts (every node in the array runs once before advancing, but any failure or block exits early to whatever `on_failure`/`on_block` targets you set). When an agent emits a handoff, capture the follow-up work in SQLite and unblock the graph with `python -m symbiont.cli graph-handoff-complete <state.json> --outcome success --result '{"verdict": "ok"}'` once the human task is finished.
 - **Handoff notifications** – Optionally add `notifications.handoff_webhook_url=https://...` in `configs/config.yaml` to receive immediate POST callbacks whenever a graph blocks on human input. Lock down outbound hooks with `notifications.allow_domains` so Slack/PagerDuty integrations stay allowlisted.

@@ -9,9 +9,10 @@ from symbiont.llm.client import LLMClient
 
 
 def test_cmd_provider_substitutes_prompt_safely():
+    py = sys.executable
     cfg = {
         "provider": "cmd",
-        "cmd": "python -c \"import sys; print(sys.argv[1])\" \"{prompt}\"",
+        "cmd": f"{py} -c \"import sys; print(sys.argv[1])\" \"{{prompt}}\"",
         "mode": "local",
     }
     client = LLMClient(cfg)
@@ -21,9 +22,10 @@ def test_cmd_provider_substitutes_prompt_safely():
 
 
 def test_cmd_provider_handles_whitespace_prompts():
+    py = sys.executable
     cfg = {
         "provider": "cmd",
-        "cmd": "python -c \"import sys; print(len(sys.argv[1]))\" \"{prompt}\"",
+        "cmd": f"{py} -c \"import sys; print(len(sys.argv[1]))\" \"{{prompt}}\"",
         "mode": "local",
     }
     client = LLMClient(cfg)
