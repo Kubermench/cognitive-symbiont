@@ -1,4 +1,4 @@
-import os, json, typer, yaml, sqlite3, time, stat
+import os, json, typer, yaml, sqlite3, time, stat, copy
 from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -356,6 +356,59 @@ def rag_cache(
                 rprint(f"    - [{source}] {title}")
             if len(items) > 5:
                 rprint("    …")
+
+
+@app.command()
+def quickstart(
+    goal: str = typer.Option("Run a quick Symbiont sanity check", "--goal", "-g", help="Goal statement for the sample cycle."),
+    config_path: str = typer.Option("./configs/config.yaml", "--config-path", help="Path to the configuration file."),
+    skip_external: bool = typer.Option(
+        True,
+        "--skip-external/--no-skip-external",
+        help="Temporarily disable external retrieval during the quickstart run.",
+    ),
+):
+    """Run a single orchestrator cycle to confirm the installation."""
+
+    cfg = load_config(config_path)
+    if not isinstance(cfg, dict):
+        rprint(f"[red]Configuration file {config_path} did not return a mapping.[/red]")
+        raise typer.Exit(1)
+    cfg_run = copy.deepcopy(cfg)
+    if skip_external:
+        retrieval_cfg = cfg_run.setdefault("retrieval", {})
+        retrieval_cfg.setdefault("external", {})["enabled"] = False
+
+    try:
+        orchestrator = Orchestrator(cfg_run)
+    except Exception as exc:
+        rprint(f"[red]Failed to initialise orchestrator:[/red] {exc}")
+        raise typer.Exit(1)
+
+    try:
+        plan_path = orchestrator.cycle(goal)
+    except Exception as exc:
+        rprint(f"[red]Quickstart run failed:[/red] {exc}")
+        raise typer.Exit(1)
+
+    rprint(f"[green]Quickstart complete.[/green] Plan saved to [cyan]{plan_path}[/cyan].")
+
+    preview_lines = []
+    try:
+        for line in Path(plan_path).read_text(encoding="utf-8").splitlines():
+            if line.startswith("## Sources"):
+                break
+            if line.startswith("- "):
+                preview_lines.append(line[2:].strip())
+    except Exception:
+        preview_lines = []
+
+    if preview_lines:
+        rprint("[green]Preview:[/green]")
+        for line in preview_lines[:3]:
+            rprint(f" - {line}")
+        if len(preview_lines) > 3:
+            rprint(" - …")
 
 
 @app.command()
