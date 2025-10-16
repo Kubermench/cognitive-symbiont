@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, json, re, time
+import os, json, re, time, logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from rich import print as rprint
@@ -19,6 +19,7 @@ from .tools.files import ensure_dirs
 from .memory import beliefs as belief_api
 from .tools import scriptify
 from .observability.shadow import ShadowClipCollector
+from .plugins import PluginRegistry, PluginLoadError
 
 class Orchestrator:
     def __init__(self, config: Dict[str, Any]):
@@ -51,6 +52,9 @@ class Orchestrator:
             self._shadow_collector = None
         self._rlhf_dir = Path(self.db.db_path).parent / "artifacts" / "rlhf"
         self._rlhf_dir.mkdir(parents=True, exist_ok=True)
+        self._plugin_logger = logging.getLogger(__name__ + ".plugins")
+        self.plugin_registry = self._init_plugin_registry()
+        self.plugins = self._load_plugins()
 
     def cycle(self, goal: str) -> Dict[str, Any]:
         self.db.ensure_schema()
@@ -109,6 +113,48 @@ class Orchestrator:
         self._log_cycle_reward(eid, goal, reward, trace)
         self._shadow_cycle(goal, decision, trace, reward=reward, episode_id=eid)
         return result
+
+    # ------------------------------------------------------------------
+    def _init_plugin_registry(self) -> PluginRegistry:
+        cfg_plugins = self.config.get("plugins") if isinstance(self.config.get("plugins"), dict) else {}
+        manifest_path = cfg_plugins.get("manifest")
+        registry = PluginRegistry(manifest_path=manifest_path) if manifest_path else PluginRegistry()
+
+        overrides = cfg_plugins.get("overrides")
+        if isinstance(overrides, dict):
+            for name, override in overrides.items():
+                entry = registry.get(name)
+                if not entry or not isinstance(override, dict):
+                    continue
+                if "enabled" in override:
+                    entry.enabled = bool(override.get("enabled"))
+                if "config" in override and isinstance(override.get("config"), dict):
+                    entry.config.update(override["config"])
+        return registry
+
+    def _load_plugins(self) -> Dict[str, Any]:
+        instances: Dict[str, Any] = {}
+        for entry in self.plugin_registry.enabled():
+            try:
+                instance = entry.instantiate()
+            except PluginLoadError as exc:
+                self._plugin_logger.warning("Plugin '%s' failed to instantiate: %s", entry.name, exc)
+                continue
+            instances[entry.name] = instance
+            register = getattr(instance, "register", None)
+            if callable(register):
+                try:
+                    register(self)
+                except Exception as exc:  # pragma: no cover - best effort registration
+                    self._plugin_logger.warning(
+                        "Plugin '%s' register() raised an error: %s", entry.name, exc
+                    )
+        if instances:
+            names = ", ".join(sorted(instances))
+            self._plugin_logger.info("Loaded plugins: %s", names)
+        else:
+            self._plugin_logger.debug("No plugins loaded.")
+        return instances
 
     def _consensus(self, trace: List[Dict[str, Any]]) -> Dict[str, Any]:
         arch = next((o for o in trace if o["role"]=="architect"), None)

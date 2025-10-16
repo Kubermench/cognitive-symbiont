@@ -38,6 +38,7 @@ from .observability.shadow_ingest import (
 )
 from .observability.shadow_dashboard import render_dashboard
 from .observability.shadow_history import record_history, load_history
+from .plugins import PluginRegistry
 
 app = typer.Typer(help="Cognitive Symbiont — MVP CLI v2.3")
 
@@ -110,7 +111,7 @@ def _label_shadow(
     return labeled, summary, out_path, guard_total, cycle_total, total, history_path
 
 
-def _prepare_script_sandbox(script_path: Path, cfg: dict, sandbox: str | None):
+def _prepare_script_sandbox(script_path: Path, cfg: dict, sandbox: Optional[str]):
     import shutil, tempfile
 
     script_path = script_path.expanduser().resolve()
@@ -178,6 +179,39 @@ def rag_reindex(
     mem_cfg = _memory_config(cfg)
     n = retrieval.build_indices(db, backend=backend, config=mem_cfg)
     rprint(f"[green]Indexed[/green] {n} items.")
+
+
+@app.command("plugins-list")
+def plugins_list(
+    manifest: Optional[str] = typer.Option(
+        None,
+        "--manifest",
+        help="Optional path to a plugin manifest (defaults to configs/plugins.yml or $SYMBIONT_PLUGINS_FILE).",
+    ),
+    enabled_only: bool = typer.Option(False, "--enabled-only", help="Only show enabled plugins."),
+    show_config: bool = typer.Option(False, "--show-config", help="Include plugin config payloads."),
+):
+    """List plugins declared in the Swarm beta manifest."""
+
+    registry = PluginRegistry(manifest_path=manifest) if manifest else PluginRegistry()
+    entries = list(registry.entries.values())
+    if enabled_only:
+        entries = [entry for entry in entries if entry.enabled]
+
+    if not entries:
+        rprint("[yellow]No plugins registered.[/yellow]")
+        return
+
+    for entry in entries:
+        status = "[green]enabled[/green]" if entry.enabled else "[red]disabled[/red]"
+        target = entry.module + (f":{entry.attribute}" if entry.attribute else "")
+        rprint(f"[bold]{entry.name}[/bold] ({status}) -> {target}")
+        if entry.description:
+            rprint(f"  {entry.description}")
+        if entry.tags:
+            rprint(f"  tags: {', '.join(entry.tags)}")
+        if show_config and entry.config:
+            rprint(f"  config: {entry.config}")
 
 
 @app.command()
@@ -1167,7 +1201,7 @@ def crew_run(
     """Run a YAML-configured crew (researcher/planner/critic/etc.)."""
 
     cfg = load_config(config_path)
-    dynamic_path: Path | None = None
+    dynamic_path: Optional[Path] = None
     if dynamic:
         from symbiont.orchestration.dynamic import generate_dynamic_crew_yaml
 
