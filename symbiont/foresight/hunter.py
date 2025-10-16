@@ -7,7 +7,7 @@ import json
 import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -23,6 +23,7 @@ OFFLINE_MOCK = Path("data/foresight/offline_sources.json")
 HUNT_DIR = Path("data/artifacts/foresight/hunts")
 METRIC_PATH = Path("data/artifacts/metrics/foresight_metrics.json")
 STATE_PATH = Path("data/foresight/state.json")
+UTC = timezone.utc
 
 
 @dataclass

@@ -13,7 +13,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -29,7 +29,7 @@ __all__ = [
 ]
 
 
-Expression = str | Callable[[Dict[str, float], Dict[str, float], Dict[str, float]], float]
+Expression = Union[str, Callable[[Dict[str, float], Dict[str, float], Dict[str, float]], float]]
 
 
 @dataclass
@@ -163,7 +163,7 @@ def simulate(
     *,
     horizon: int = 50,
     noise: float = 0.0,
-    artifacts_dir: Path | str = Path("data/artifacts/plots"),
+    artifacts_dir: Union[Path, str] = Path("data/artifacts/plots"),
     make_plot: bool = True,
     stability_tol: float = 0.01,
     min_steps: int = 12,
@@ -242,7 +242,7 @@ def _summarise(stocks: Iterable[Stock], timeline: Sequence[Dict[str, float]]) ->
 def _try_make_plot(
     stocks: Iterable[Stock],
     timeline: Sequence[Dict[str, float]],
-    artifacts_dir: Path | str,
+    artifacts_dir: Union[Path, str],
 ) -> Optional[str]:
     try:
         import matplotlib

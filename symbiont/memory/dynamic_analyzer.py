@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
 
 
@@ -119,6 +119,9 @@ def _infer_age_days(published: str) -> float:
     except ValueError:
         return 365.0
     return max(1.0, (datetime.now(UTC) - pub_dt).days)
+
+
+UTC = timezone.utc
 
 
 __all__ = ["BayesianTrendAnalyzer", "deduplicate_triples"]

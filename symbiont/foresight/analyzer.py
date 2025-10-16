@@ -6,7 +6,7 @@ import json
 import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -20,6 +20,7 @@ LOGGER = logging.getLogger(__name__)
 DIFF_DIR = Path("data/artifacts/foresight/rag_diffs")
 SNAPSHOT_DIR = Path("data/foresight/rag_snapshots")
 PLOT_DIR = Path("data/artifacts/foresight/plots")
+UTC = timezone.utc
 
 try:  # Optional heavy dependencies (pgmpy, pandas, matplotlib) stay guarded.
     from pgmpy.models import BayesianNetwork  # type: ignore

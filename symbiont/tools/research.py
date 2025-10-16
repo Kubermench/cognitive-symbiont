@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -36,6 +36,11 @@ from symbiont.tools.arxiv_fetcher import search_arxiv
 from symbiont.tools.files import ensure_dirs
 
 logger = logging.getLogger(__name__)
+
+try:  # Python 3.11+
+    UTC = timezone.utc  # type: ignore[assignment]
+except AttributeError:  # pragma: no cover - defensive on exotic interpreters
+    UTC = timezone.utc  # same fallback, placeholder for older stdlib variants
 
 ARTIFACT_ROOT = Path("data/artifacts/foresight")
 COLLABORATOR_MODELS: Tuple[str, ...] = ("grok", "devin")

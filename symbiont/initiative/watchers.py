@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os, time, subprocess
 from dataclasses import dataclass, field
+import sys
 from pathlib import Path
 from typing import Optional, Iterable, List, Tuple, Dict
 
@@ -12,6 +13,8 @@ except Exception:  # pragma: no cover - yaml should be available but keep option
 _SCAN_CACHE: Dict[str, Tuple[float, int]] = {}
 _SCAN_TTL_SECONDS = 30
 _SCAN_SKIP_DIRS = {".git", "data", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".idea", ".vscode"}
+
+_DATACLASS_SLOTS = {"slots": True} if sys.version_info >= (3, 10) else {}
 
 def _cached_latest_mtime(root: str) -> int:
     now = time.time()
@@ -39,7 +42,7 @@ class WatchEvent:
     payload: dict
 
 
-@dataclass(slots=True)
+@dataclass(**_DATACLASS_SLOTS)
 class RepoWatchConfig:
     """Normalized watcher configuration for a repository root."""
 
