@@ -1,0 +1,52 @@
+agents:
+  bias_support_agent:
+    role: bias_probe
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+    instructions: |
+      Gather supportive evidence for the topic using recent memory, RAG context, and foresight hunts.
+      Extract the clearest 3-5 arguments that suggest the claim is well-founded. Include citations when available.
+      Output labeled bullets under the heading "Support".
+
+  bias_contrarian_agent:
+    role: bias_contrarian
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+    instructions: |
+      Surface counter-evidence, failure modes, and critics of the topic.
+      Prioritize diverse viewpoints (academic, industry, governance) and highlight potential blind spots.
+      Limit to the top 3-5 contrarian findings with citations when available.
+      Output labeled bullets under the heading "Challenges".
+
+  bias_mediator_agent:
+    role: bias_mediator
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+    instructions: |
+      Review the supporting and challenging evidence.
+      Score the robustness of the topic on a 0.0-1.0 scale (1.0 = highly balanced, 0.0 = very biased).
+      Recommend one action to broaden perspective if the score is below 0.6.
+      Respond with a markdown summary containing sections for Support, Challenges, and Robustness (include the numeric score).
+
+crew:
+  bias_hunter:
+    description: Evaluate a topic for confirmation bias by balancing supportive and contrarian evidence.
+    sequence:
+      - bias_support_agent
+      - bias_contrarian_agent
+      - bias_mediator_agent

@@ -47,6 +47,7 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
 - Guarded actions: UI and CLI confirmations for script writes and runs; actions recorded in `audits`.
 - Reflection + mutation: each cycle feeds `data/evolution/state.json`; `sym evolve_self --scope planner` queues guarded prompt tweaks (≤5% diff) saved under `data/artifacts/mutations/` after triple sandbox validation.
 - Swarm evolution: enable `evolution.swarm_enabled=true` to spawn parallel belief variants, score via peer chats, and merge consensus claims (`sym swarm_evolve "belief: UI->prefers->dark_mode"`).
+- Bias hunter: run `sym bias-check "topic or claim"` to weigh supportive vs. contrarian evidence and surface mitigation advice for confirmation bias.
 - Rollback sandbox: `python -m symbiont.cli rollback-test data/artifacts/scripts/apply_*.sh` runs apply→rollback→apply in a temp checkout to guarantee idempotence before human approval.
 - External RAG bridge: `python -m symbiont.cli rag-fetch-external "agentic AI"` hits arXiv + Semantic Scholar, caches under `data/external/`, and merges high-confidence triples into GraphRAG before the next cycle. Flip `retrieval.external.enabled` to `true` in `configs/config.yaml` to make this automatic for every orchestration cycle or graph run, and use `python -m symbiont.cli rag-cache` to inspect/clear cached fetches.
 - Reflector meta-learning: cycle rewards quietly tune the planner repeat/empty thresholds so evolution triggers sooner when diversity or bullet quality dips.

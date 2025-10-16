@@ -240,6 +240,39 @@ agents:
       hybrid_threshold_tokens: 0
     cache: in_memory
     tools: []
+  bias_support_agent:
+    role: bias_probe
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+    instructions: >-
+      Gather the strongest supporting arguments for the target topic and cite sources when available.
+  bias_contrarian_agent:
+    role: bias_contrarian
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+    instructions: >-
+      Surface counter-evidence, dissent, and latent risks that could invalidate the topic.
+  bias_mediator_agent:
+    role: bias_mediator
+    llm:
+      provider: ollama
+      model: phi3:mini
+      mode: hybrid
+      hybrid_threshold_tokens: 0
+    cache: in_memory
+    tools: []
+    instructions: >-
+      Compare supportive vs contrarian evidence and produce a robustness score plus mitigation advice.
 
 crew:
   quick_fix:
@@ -293,3 +326,9 @@ crew:
       - foresight_suggester_agent
       - foresight_validator_agent
       - foresight_evolver_agent
+  bias_hunter:
+    description: Evaluate topics for confirmation bias by balancing supportive and opposing evidence.
+    sequence:
+      - bias_support_agent
+      - bias_contrarian_agent
+      - bias_mediator_agent

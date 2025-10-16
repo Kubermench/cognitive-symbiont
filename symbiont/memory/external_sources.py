@@ -6,10 +6,11 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import urlparse
 
 import requests
-
 from .graphrag import add_claim
 from .db import MemoryDB
 
@@ -17,6 +18,9 @@ from .db import MemoryDB
 CACHE_DIR = Path("data/external")
 DEFAULT_TTL_SECONDS = 24 * 3600  # one day
 USER_AGENT = "SymbiontExternalFetcher/0.1 (+https://github.com/)"
+
+
+_DEFAULT_FETCHER: Optional["ExternalSourceFetcher"] = None
 
 
 @dataclass
@@ -50,11 +54,15 @@ class ExternalSourceFetcher:
         cache_dir: Path | str = CACHE_DIR,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         session: Optional[requests.Session] = None,
+        rate_limit_seconds: float = 1.0,
     ) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.ttl_seconds = max(60, int(ttl_seconds))
         self._session = session or requests.Session()
+        self._rate_limit_seconds = max(0.0, float(rate_limit_seconds))
+        self._last_call: Dict[str, float] = {}
+        self._lock = Lock()
 
     # ------------------------------------------------------------------
     def search(
@@ -113,8 +121,10 @@ class ExternalSourceFetcher:
             "start": 0,
             "max_results": max(1, min(10, limit)),
         }
+        url = "http://export.arxiv.org/api/query"
+        self._throttle(url)
         response = self._session.get(
-            "http://export.arxiv.org/api/query",
+            url,
             params=params,
             headers={"User-Agent": USER_AGENT},
             timeout=12,
@@ -161,8 +171,10 @@ class ExternalSourceFetcher:
             "limit": max(1, min(10, limit)),
             "fields": "title,abstract,url,venue,year,authors",
         }
+        url = "https://api.semanticscholar.org/graph/v1/paper/search"
+        self._throttle(url)
         response = self._session.get(
-            "https://api.semanticscholar.org/graph/v1/paper/search",
+            url,
             params=params,
             headers={"User-Agent": USER_AGENT},
             timeout=12,
@@ -223,6 +235,8 @@ class ExternalSourceFetcher:
                         "query": query,
                         "max_items": max_items,
                         "items": payload,
+                        "updated_at": int(time.time()),
+                        "item_count": len(payload),
                     },
                     indent=2,
                 ),
@@ -234,6 +248,23 @@ class ExternalSourceFetcher:
     def _cache_path(self, query: str, max_items: int) -> Path:
         fingerprint = hashlib.sha256(f"{query}|{max_items}".encode("utf-8")).hexdigest()
         return self.cache_dir / f"{fingerprint}.json"
+
+    def _throttle(self, url: str) -> None:
+        if self._rate_limit_seconds <= 0:
+            return
+        try:
+            host = urlparse(url).netloc or "default"
+        except Exception:
+            host = "default"
+        with self._lock:
+            last = self._last_call.get(host)
+            now = time.monotonic()
+            if last is not None:
+                wait_for = self._rate_limit_seconds - (now - last)
+                if wait_for > 0:
+                    time.sleep(wait_for)
+                    now = time.monotonic()
+            self._last_call[host] = now
 
     # ------------------------------------------------------------------
     def _score_relevance(self, query: str, title: str, summary: str) -> float:
@@ -259,7 +290,11 @@ def fetch_and_store_external_context(
 ) -> Dict[str, Any]:
     """Fetch external knowledge and merge high-confidence claims into GraphRAG."""
 
-    fetcher = fetcher or ExternalSourceFetcher()
+    global _DEFAULT_FETCHER
+    if fetcher is None:
+        if _DEFAULT_FETCHER is None:
+            _DEFAULT_FETCHER = ExternalSourceFetcher()
+        fetcher = _DEFAULT_FETCHER
     items = fetcher.search(query, max_items=max_items, min_relevance=min_relevance)
     accepted: List[ExternalItem] = []
     claims: List[Dict[str, Any]] = []
@@ -341,6 +376,8 @@ def list_cache_entries(cache_dir: Path | str = CACHE_DIR) -> List[Dict[str, Any]
                 "query": str(payload.get("query") or "unknown"),
                 "max_items": payload.get("max_items"),
                 "items": items,
+                "updated_at": payload.get("updated_at"),
+                "item_count": payload.get("item_count", len(items)),
             }
         elif isinstance(payload, list):
             entry = {
@@ -353,12 +390,12 @@ def list_cache_entries(cache_dir: Path | str = CACHE_DIR) -> List[Dict[str, Any]
             continue
         try:
             stat = path.stat()
-            entry["updated_at"] = int(stat.st_mtime)
+            entry.setdefault("updated_at", int(stat.st_mtime))
             entry["size"] = stat.st_size
         except OSError:
             entry["updated_at"] = None
             entry["size"] = None
-        entry["item_count"] = len(entry["items"])
+        entry.setdefault("item_count", len(entry["items"]))
         entries.append(entry)
     return entries
 

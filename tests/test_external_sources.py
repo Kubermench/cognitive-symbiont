@@ -107,3 +107,33 @@ def test_fetcher_uses_cache_and_merges_claims(memory_db: MemoryDB, tmp_path: Pat
 
     titles = {claim["object"] for claim in claims}
     assert any("Agentic AI for Reliable Systems" in title for title in titles)
+
+
+def test_fetcher_enforces_rate_limit(monkeypatch, tmp_path: Path) -> None:
+    session = FakeSession()
+    fetcher = ExternalSourceFetcher(
+        cache_dir=tmp_path / "cache",
+        ttl_seconds=3600,
+        session=session,
+        rate_limit_seconds=2.0,
+    )
+
+    timeline = {"now": 0.0}
+    sleeps: list[float] = []
+
+    def fake_monotonic() -> float:
+        return timeline["now"]
+
+    def fake_sleep(duration: float) -> None:
+        sleeps.append(duration)
+        timeline["now"] += duration
+
+    monkeypatch.setattr("symbiont.memory.external_sources.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("symbiont.memory.external_sources.time.sleep", fake_sleep)
+
+    list(fetcher._fetch_arxiv(query="agentic systems", limit=1))
+    timeline["now"] += 0.5
+    list(fetcher._fetch_arxiv(query="agentic systems", limit=1))
+
+    assert session.call_count == 2
+    assert sleeps and pytest.approx(sleeps[0], rel=1e-3) == 1.5

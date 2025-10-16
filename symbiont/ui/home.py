@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os, json, sqlite3, time, threading, statistics
 from pathlib import Path
+from typing import Any
 import streamlit as st
 from symbiont.memory.db import MemoryDB
 from symbiont.memory import retrieval
@@ -161,6 +162,29 @@ def _build_budget_chart(rows: list[dict[str, Any]]) -> dict[str, list[float]]:
     return series
 
 
+def _upsert_env_var(key: str, value: str, env_path: Path | None = None) -> None:
+    if not value:
+        return
+    env_path = env_path or Path(".env")
+    lines: list[str] = []
+    found = False
+    if env_path.exists():
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            if not raw or raw.strip().startswith("#"):
+                lines.append(raw)
+                continue
+            name, _, remainder = raw.partition("=")
+            if name == key:
+                lines.append(f"{key}={value}")
+                found = True
+            else:
+                lines.append(raw)
+    if not found:
+        lines.append(f"{key}={value}")
+    text = "\n".join(lines).rstrip("\n") + "\n"
+    env_path.write_text(text, encoding="utf-8")
+
+
 def render_home(cfg: dict, db: MemoryDB):
     st.title("🧠 Cognitive Symbiont — Homebase (v3.6)")
     st.autorefresh(interval=15000, key="home_autorefresh")
@@ -177,9 +201,95 @@ def render_home(cfg: dict, db: MemoryDB):
             "- **Guard rails:** scripts never run automatically; file writes, command runs, and web fetches all wait for you to approve them and are recorded in the audit log."
         )
 
-    tab_dash, tab_art, tab_ep, tab_settings, tab_sandbox = st.tabs(
-        ["Dashboard", "Outputs & Scripts", "Episodes & Tasks", "Settings", "Sandbox"]
+    tab_quick, tab_dash, tab_art, tab_ep, tab_settings, tab_sandbox = st.tabs(
+        ["Quickstart Wizard", "Dashboard", "Outputs & Scripts", "Episodes & Tasks", "Settings", "Sandbox"]
     )
+
+    with tab_quick:
+        st.subheader("Guided Setup")
+        st.markdown(
+            "Configure Symbiont's essentials without editing YAML by hand."
+            " Choose your LLM mode, optional cloud fallback, and whether to enable external research hunts."
+        )
+
+        llm_cfg = cfg.get("llm", {})
+        current_mode = llm_cfg.get("mode", "local").lower()
+        mode = st.radio(
+            "LLM mode",
+            options=["local", "hybrid", "cloud"],
+            index=["local", "hybrid", "cloud"].index(current_mode if current_mode in {"local", "hybrid", "cloud"} else "local"),
+            horizontal=True,
+        )
+        provider = st.selectbox(
+            "Local provider",
+            options=["ollama", "cmd", "none"],
+            index=["ollama", "cmd", "none"].index(llm_cfg.get("provider", "ollama") if llm_cfg.get("provider", "ollama") in {"ollama", "cmd", "none"} else "ollama"),
+            help="Choose the primary local provider. 'cmd' lets you supply a custom command fallback.",
+        )
+        model = st.text_input("Local model ID", llm_cfg.get("model", "phi3:mini"))
+        timeout = st.slider("Timeout (seconds)", min_value=10, max_value=900, value=int(llm_cfg.get("timeout_seconds", 600)), step=10)
+
+        cloud_cfg = llm_cfg.get("cloud", {}) if isinstance(llm_cfg.get("cloud"), dict) else {}
+        cloud_provider = st.text_input("Cloud provider", cloud_cfg.get("provider", "openai"), disabled=mode == "local")
+        cloud_model = st.text_input("Cloud model", cloud_cfg.get("model", cloud_cfg.get("model_name", "gpt-4o-mini")), disabled=mode == "local")
+        api_key_env = cloud_cfg.get("api_key_env", "OPENAI_API_KEY")
+        api_key_value = st.text_input(
+            f"{api_key_env} (optional; saved to .env)",
+            value="",
+            type="password",
+            help="Leave blank to keep existing key."
+        )
+        save_api_key = st.checkbox("Update .env with the provided API key", value=bool(api_key_value))
+
+        retr_cfg = cfg.get("retrieval", {}) if isinstance(cfg.get("retrieval"), dict) else {}
+        external_cfg = retr_cfg.get("external", {}) if isinstance(retr_cfg.get("external"), dict) else {}
+        external_enabled = st.checkbox(
+            "Enable external research hunts (arXiv, Semantic Scholar)",
+            value=bool(external_cfg.get("enabled", False)),
+        )
+        max_items = st.number_input(
+            "Max external items per query",
+            min_value=1,
+            max_value=20,
+            value=int(external_cfg.get("max_items", 6)),
+            step=1,
+            disabled=not external_enabled,
+        )
+        min_relevance = st.slider(
+            "Minimum relevance threshold",
+            min_value=0.1,
+            max_value=1.0,
+            value=float(external_cfg.get("min_relevance", 0.7)),
+            step=0.05,
+            disabled=not external_enabled,
+        )
+
+        if st.button("Apply Quickstart Settings", type="primary"):
+            try:
+                cfg.setdefault("llm", {})
+                cfg["llm"]["mode"] = mode
+                cfg["llm"]["provider"] = provider
+                cfg["llm"]["model"] = model
+                cfg["llm"]["timeout_seconds"] = timeout
+                cfg["llm"].setdefault("cloud", {})
+                cfg["llm"]["cloud"]["provider"] = cloud_provider or "openai"
+                cfg["llm"]["cloud"]["model"] = cloud_model or "gpt-4o-mini"
+                cfg["llm"]["cloud"]["api_key_env"] = api_key_env
+                retrieval_section = cfg.setdefault("retrieval", {})
+                external_section = retrieval_section.setdefault("external", {})
+                external_section["enabled"] = bool(external_enabled)
+                external_section["max_items"] = int(max_items)
+                external_section["min_relevance"] = float(min_relevance)
+                env_path = Path(".env")
+                if save_api_key and api_key_value:
+                    _upsert_env_var(api_key_env, api_key_value, env_path=env_path)
+                with open("./configs/config.yaml", "w", encoding="utf-8") as handle:
+                    import yaml as _y
+
+                    _y.safe_dump(cfg, handle, sort_keys=False)
+                st.success("Quickstart settings saved.")
+            except Exception as exc:
+                st.error(f"Failed to persist settings: {exc}")
 
     with tab_dash:
         st.markdown("**How it works** — scout → architect → critic → plan + safe script (never auto‑runs). You approve; everything is logged and reversible.")

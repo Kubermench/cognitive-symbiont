@@ -1244,6 +1244,31 @@ def swarm_merge_transcripts(config_path: str = "./configs/config.yaml"):
 
 
 @app.command()
+def bias_check(
+    topic: str = typer.Argument(..., help="Topic, claim, or proposal to stress-test for bias"),
+    config_path: str = "./configs/config.yaml",
+    crew_path: str = "./configs/crews/bias_hunter.yaml",
+):
+    """Run the Bias Hunter crew to surface supporting vs opposing evidence."""
+
+    cfg = load_config(config_path)
+    crews_file = Path(crew_path)
+    if not crews_file.exists():
+        rprint(f"[red]Bias crew config not found:[/red] {crews_file}")
+        raise typer.Exit(1)
+
+    registry = AgentRegistry.from_yaml(crews_file)
+    db = MemoryDB(db_path=cfg["db_path"])
+    runner = CrewRunner(registry, cfg, db)
+    try:
+        artifact_path = runner.run("bias_hunter", topic)
+    except KeyError as exc:
+        rprint(f"[red]{exc}")
+        raise typer.Exit(1)
+    rprint(f"[green]Bias Hunter completed.[/green] Transcript: {artifact_path}")
+
+
+@app.command()
 def crew_run(
     crew: str,
     goal: str = typer.Argument(..., help="Goal for the crew to address"),

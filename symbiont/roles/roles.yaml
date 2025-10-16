@@ -15,3 +15,6 @@ roles:
   - {name: foresight_suggester, goal: 'Draft proposals based on insights', style: 'pragmatic'}
   - {name: foresight_validator, goal: 'Evaluate risk and tests for proposals', style: 'skeptical'}
   - {name: foresight_evolver, goal: 'Decide and log foresight outcomes', style: 'decisive'}
+  - {name: bias_probe, goal: 'Compile supporting evidence and narratives', style: 'investigative'}
+  - {name: bias_contrarian, goal: 'Unearth counter-evidence and failure modes', style: 'critical'}
+  - {name: bias_mediator, goal: 'Reconcile perspectives and score robustness', style: 'balanced'}
