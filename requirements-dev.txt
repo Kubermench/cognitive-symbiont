@@ -1,3 +1,6 @@
 # Development-only dependencies
 -r requirements.txt
+pytest==8.3.2
+pytest-cov==5.0.0
+hypothesis==6.112.1
 openai>=1.46.0

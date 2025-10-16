@@ -1,6 +1,10 @@
-# Optional extras for foresight analytics
+# Optional extras bundle (UI, foresight, observability, integrations)
+streamlit==1.38.0
+pyttsx3==2.90
+prometheus-client==0.20.0
+PyGithub==2.4.0
+feedparser==6.0.10
 pgmpy>=0.1.24
 dowhy>=0.11.1
-# Memory-layer integrations
 mem0ai>=0.1.118
 letta-client>=0.1.324

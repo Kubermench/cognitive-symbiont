@@ -1,0 +1,36 @@
+# Minimal configuration intended for quick-start and low-resource environments.
+env: dev
+data_root: ./data
+db_path: ./data/symbiont.db
+max_tokens: 4000
+
+memory:
+  layer: local
+
+llm:
+  provider: ollama
+  model: phi3:mini
+  mode: local
+  timeout_seconds: 180
+
+initiative:
+  enabled: false
+  repo_path: .
+
+foresight:
+  enabled: false
+
+retrieval:
+  external:
+    enabled: false
+
+evolution:
+  enabled: false
+
+tools:
+  allow_code_runner: true
+  allow_files: true
+  network_access: false
+
+guard:
+  auto_approve_safe: false

@@ -39,8 +39,11 @@ from .observability.shadow_ingest import (
 from .observability.shadow_dashboard import render_dashboard
 from .observability.shadow_history import record_history, load_history
 from .plugins import PluginRegistry
+from .setup import InitOptions, run_init_wizard
+from .db import init_memory_db
 
 app = typer.Typer(help="Cognitive Symbiont — MVP CLI v2.3")
+
 
 def load_config(path: str = "./configs/config.yaml"):
     with open(path,"r",encoding="utf-8") as f: return yaml.safe_load(f)
@@ -163,9 +166,62 @@ def _prepare_script_sandbox(script_path: Path, cfg: dict, sandbox: Optional[str]
     }
 
 @app.command()
-def init(config_path: str = "./configs/config.yaml"):
-    cfg=load_config(config_path); db=MemoryDB(db_path=cfg["db_path"]); db.ensure_schema()
-    rprint(f"[green]DB initialized at[/green] {cfg['db_path']}")
+def init(
+    config_path: str = typer.Option(
+        "./configs/config.yaml",
+        "--config-path",
+        help="Configuration file used to initialise the database.",
+        show_default=True,
+    ),
+    lite: bool = typer.Option(
+        False,
+        "--lite",
+        help="Generate a minimal configuration profile before initialising the database.",
+        is_flag=True,
+    ),
+    path: Optional[Path] = typer.Option(
+        None,
+        "--path",
+        help="Target path for a generated configuration (defaults to ./configs/config.local.yaml).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite the generated configuration if it already exists.",
+        is_flag=True,
+    ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Skip interactive prompts when generating configuration.",
+        is_flag=True,
+    ),
+    wizard: bool = typer.Option(
+        False,
+        "--wizard",
+        help="Run the setup wizard even without other generation flags.",
+        is_flag=True,
+    ),
+):
+    should_run_wizard = wizard or lite or path is not None or non_interactive or force
+    generated_path: Optional[Path] = None
+    if should_run_wizard:
+        target_path = path or Path("./configs/config.local.yaml")
+        options = InitOptions(
+            lite=lite,
+            target_path=target_path,
+            force=force,
+            non_interactive=non_interactive,
+        )
+        generated_path = run_init_wizard(options)
+        config_path = str(generated_path)
+
+    cfg = load_config(config_path)
+    db_path = cfg["db_path"]
+    init_memory_db(db_path)
+    rprint(f"[green]DB initialized at[/green] {db_path}")
+    if generated_path:
+        rprint(f"[cyan]Generated configuration saved to[/cyan] {generated_path}")
 
 @app.command()
 def rag_reindex(

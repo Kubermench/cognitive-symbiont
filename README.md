@@ -107,8 +107,18 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
 
 1) Install
 - Python 3.10+ and git installed.
-- `pip install -r requirements.txt`
-- Optional foresight extras: `pip install -r requirements-optional.txt`
+- `pip install .` for the minimal CLI + core runtime (see `docs/QUICKSTART.md` for a five-command walkthrough).
+- Layer extras as needed; each extra maps 1:1 to optional features:
+
+| Extra | Install command | Unlocks |
+|-------|-----------------|---------|
+| `ui` | `pip install .[ui]` | Streamlit dashboards (`app.py`, BigKit) |
+| `foresight` | `pip install .[foresight]` | arXiv/RSS hunts and causal tooling |
+| `observability` | `pip install .[observability]` | Prometheus metrics server |
+| `github` | `pip install .[github]` | GitHub guard + PR helper |
+| `voice` | `pip install .[voice]` | Voice ports (TTS/STT stubs) |
+| `memory` | `pip install .[memory]` | External memory backends (Mem0, Letta) |
+| all-in | `pip install -r requirements-optional.txt` | Every optional feature |
 
 2) Homebase UI
 - Start: `streamlit run app.py`
@@ -123,6 +133,7 @@ Symbiont never changes files until you press **Confirm**, and every action (plan
 
 3) CLI (shell alias optional)
 - Set alias (optional): `alias sym="python -m symbiont.cli"`
+- Quick start: `sym init --lite --non-interactive` writes `configs/config.local.yaml`, ensures the SQLite schema, and applies environment autodetection; add `--wizard` to walk through prompts.
 - Propose here: `sym propose_here`
 - Initiative once: `sym initiative_once --force`
 - Daemon: `sym initiative_daemon`

@@ -21,15 +21,9 @@ dependencies = [
   "orjson==3.10.7",
   "httpx==0.27.2",
   "PyYAML==6.0.2",
-  "streamlit==1.38.0",
-  "pyttsx3==2.90",
   "networkx==3.3",
   "requests==2.32.3",
-  "PyGithub==2.4.0",
-  "tenacity==8.2.3",
-  "hypothesis==6.112.1",
-  "prometheus-client==0.20.0",
-  "feedparser==6.0.10"
+  "tenacity==8.2.3"
 ]
 dynamic = ["version"]
 
@@ -37,11 +31,29 @@ dynamic = ["version"]
 dev = [
   "pytest==8.3.2",
   "pytest-cov==5.0.0",
+  "hypothesis==6.112.1",
   "openai>=1.46.0"
 ]
 foresight = [
+  "feedparser==6.0.10",
   "pgmpy>=0.1.24",
   "dowhy>=0.11.1"
+]
+ui = [
+  "streamlit==1.38.0"
+]
+voice = [
+  "pyttsx3==2.90"
+]
+github = [
+  "PyGithub==2.4.0"
+]
+observability = [
+  "prometheus-client==0.20.0"
+]
+memory = [
+  "mem0ai>=0.1.118",
+  "letta-client>=0.1.324"
 ]
 
 [project.scripts]
@@ -60,4 +72,3 @@ include = ["symbiont*","bigkit_v3alpha*","systems*","configs*","scripts*"]
 
 [tool.setuptools.package-data]
 "symbiont" = ["**/*.yaml", "**/*.yml", "**/*.sql", "**/*.json"]
-
