@@ -1,0 +1,76 @@
+name: Cognitive Symbiont
+description: Open a pull request with small, verified fixes (lint fixed, tests still passing).
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  limit:
+    description: Maximum number of verified fixes per run.
+    default: "5"
+  setup-command:
+    description: Shell command that installs the repo's own dependencies so its tests can run.
+    default: ""
+  python-version:
+    description: Python used for Symbiont and for the repo's tests.
+    default: "3.12"
+  llm-provider:
+    description: "none (ruff fixes only), anthropic, openai, or ollama."
+    default: none
+  llm-model:
+    description: Model name for the provider, e.g. claude-sonnet-5-5.
+    default: ""
+  api-key:
+    description: API key for the provider; pass it from a repository secret.
+    default: ""
+  branch:
+    description: Branch the fixes are pushed to.
+    default: symbiont/fixes
+  token:
+    description: Token used to push the branch and open the pull request.
+    default: ${{ github.token }}
+
+outputs:
+  pull-request-url:
+    description: URL of the pull request, if one was opened or updated.
+    value: ${{ steps.pr.outputs.pull-request-url }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Symbiont
+      shell: bash
+      run: python -m pip install --quiet "$GITHUB_ACTION_PATH"
+
+    - name: Install the repository's dependencies
+      if: inputs.setup-command != ''
+      shell: bash
+      run: ${{ inputs.setup-command }}
+
+    - name: Propose and apply verified fixes
+      shell: bash
+      env:
+        SYMBIONT_LLM_PROVIDER: ${{ inputs.llm-provider }}
+        SYMBIONT_LLM_MODEL: ${{ inputs.llm-model }}
+        SYMBIONT_LLM_API_KEY_ENV: SYMBIONT_API_KEY
+        SYMBIONT_API_KEY: ${{ inputs.api-key }}
+        LIMIT: ${{ inputs.limit }}
+      run: |
+        sym propose --apply --limit "$LIMIT"
+        sym summary > "$RUNNER_TEMP/symbiont-pr.md"
+
+    - name: Open or update the pull request
+      id: pr
+      uses: peter-evans/create-pull-request@v7
+      with:
+        token: ${{ inputs.token }}
+        branch: ${{ inputs.branch }}
+        delete-branch: true
+        commit-message: "symbiont: verified fixes"
+        title: "Symbiont: verified fixes"
+        body-path: ${{ runner.temp }}/symbiont-pr.md
+        labels: symbiont

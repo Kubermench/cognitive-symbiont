@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -116,4 +117,9 @@ def _load(root: Path) -> Config:
         cfg.max_file_lines = int(limits["max_file_lines"])
     if limits.get("check_timeout") is not None:
         cfg.check_timeout = int(limits["check_timeout"])
+    # Environment overrides, e.g. for CI where a model is chosen per workflow.
+    for key in ("provider", "model", "host", "base_url", "api_key_env"):
+        value = os.environ.get(f"SYMBIONT_LLM_{key.upper()}")
+        if value:
+            setattr(cfg.llm, key, value)
     return cfg

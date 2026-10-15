@@ -20,17 +20,18 @@ app = typer.Typer(
     help="Find small problems in a repo, fix them in an isolated worktree, verify, then hand you a patch.",
 )
 console = Console()
+err = Console(stderr=True)  # warnings and errors, so stdout stays clean for `sym summary`
 
 
 def _root() -> Path:
     try:
         root = repo_root(Path.cwd())
     except GitError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from None
     problem = lint.config_problem(root)
     if problem:
-        console.print(
+        err.print(
             f"[yellow]Ignoring the repo's ruff config ({problem}); using Symbiont's lint rules.[/yellow]"
         )
     return root
@@ -40,7 +41,7 @@ def _config(root: Path) -> config.Config:
     try:
         return config.load(root)
     except config.ConfigError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from None
 
 
@@ -48,7 +49,7 @@ def _plan(root: Path, cfg: config.Config) -> list[engine.Task]:
     try:
         return engine.plan(root, cfg)
     except RuntimeError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from None
 
 
@@ -59,13 +60,13 @@ def _engine(root: Path, no_llm: bool) -> engine.Engine:
     try:
         llm = from_config(cfg.llm)
     except LLMError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from None
     return engine.Engine(
         root,
         cfg,
         llm,
-        log=lambda msg: console.print(msg, style="dim", markup=False, highlight=False),
+        log=lambda msg: err.print(msg, style="dim", markup=False, highlight=False),
     )
 
 
@@ -145,11 +146,14 @@ def scan() -> None:
 def propose(
     limit: int = typer.Option(3, "--limit", "-n", help="Stop after this many verified proposals."),
     no_llm: bool = typer.Option(False, "--no-llm", help="Only use ruff's deterministic fixes."),
+    apply_: bool = typer.Option(
+        False, "--apply", help="Apply each verified fix right away so the next one builds on it."
+    ),
 ) -> None:
     """Attempt fixes for scanned tasks; keep only those that verify."""
     root = _root()
     eng = _engine(root, no_llm)
-    _report(eng.propose(_plan(root, eng.cfg), limit))
+    _report(eng.propose(_plan(root, eng.cfg), limit, apply=apply_))
 
 
 @app.command()
@@ -161,14 +165,38 @@ def ask(
     root = _root()
     target = file.resolve()
     if not target.is_file():
-        console.print(f"[red]{file} is not a file[/red]")
+        err.print(f"[red]{file} is not a file[/red]")
         raise typer.Exit(2)
     rel = str(target.relative_to(root))
     eng = _engine(root, no_llm=False)
     if eng.llm is None:
-        console.print("[red]ask needs an LLM; set llm.provider in .symbiont.yml[/red]")
+        err.print("[red]ask needs an LLM; set llm.provider in .symbiont.yml[/red]")
         raise typer.Exit(2)
     _report(eng.propose([engine.ask_task(rel, instruction)], limit=1))
+
+
+@app.command()
+def summary(
+    status: str = typer.Option(
+        "applied", help="Which proposals to include: applied, ready or all."
+    ),
+) -> None:
+    """Print proposals and their evidence as Markdown (used as the automated PR description)."""
+    props = [p for p in Store(_root()).all() if status == "all" or p.status == status]
+    if not props:
+        print("No verified fixes this run.")
+        return
+    print(
+        f"Symbiont made {len(props)} verified fix(es). Each one was made in an isolated worktree;"
+    )
+    print("it parses, removes the targeted lint findings without adding new ones, and every check")
+    print("that passed before still passes.\n")
+    for p in props:
+        print(f"### {p.title}\n")
+        print(f"Files: {', '.join(f'`{f}`' for f in p.files)}\n")
+        for line in p.evidence:
+            print(f"- {line}")
+        print()
 
 
 @app.command("list")
@@ -192,7 +220,7 @@ def show(pid: int) -> None:
     try:
         p = store.get(pid)
     except KeyError as exc:
-        console.print(f"[red]{exc.args[0]}[/red]")
+        err.print(f"[red]{exc.args[0]}[/red]")
         raise typer.Exit(1) from None
     console.print(f"[bold]#{p.id} {p.title}[/bold]  ({p.status})")
     for line in p.evidence:
@@ -205,7 +233,7 @@ def _transition(action: str, pid: int) -> None:
     try:
         p = getattr(store, action)(pid)
     except (KeyError, ValueError, GitError) as exc:
-        console.print(f"[red]{exc.args[0] if exc.args else exc}[/red]")
+        err.print(f"[red]{exc.args[0] if exc.args else exc}[/red]")
         raise typer.Exit(1) from None
     console.print(f"#{p.id} {p.status}: {p.title}")
 

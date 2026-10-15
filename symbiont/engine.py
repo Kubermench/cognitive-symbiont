@@ -142,7 +142,9 @@ class Engine:
         return self._baseline
 
     # -- main loop ------------------------------------------------------------
-    def propose(self, tasks: list[Task], limit: int) -> list[Outcome]:
+    def propose(self, tasks: list[Task], limit: int, apply: bool = False) -> list[Outcome]:
+        """Attempt tasks until `limit` proposals exist. With `apply`, each verified proposal is
+        applied before the next attempt, so later fixes build on earlier ones."""
         open_titles = {p.title for p in self.store.all() if p.status in ("ready", "applied")}
         outcomes: list[Outcome] = []
         made = 0
@@ -162,6 +164,8 @@ class Engine:
             verdict = f"proposal #{outcome.proposal.id}" if outcome.proposal else "rejected"
             self.log(f"  -> {verdict}: {outcome.reason}")
             outcomes.append(outcome)
+            if outcome.proposal and apply:
+                self.store.apply(outcome.proposal.id)
             made += outcome.proposal is not None
         return outcomes
 
@@ -249,7 +253,7 @@ class Engine:
         assert sb.path is not None
         changed = sb.changed_files()
         if not changed:
-            raise Rejected("no changes were made")
+            raise Rejected("nothing to change (an earlier fix may already have resolved it)")
         if task.kind != "lint-autofix" and changed != [task.file]:
             raise Rejected(f"changed files other than {task.file}: {', '.join(changed)}")
 

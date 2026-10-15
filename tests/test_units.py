@@ -79,3 +79,20 @@ def test_invalid_config_is_a_clean_error(repo, monkeypatch):
     monkeypatch.chdir(repo)
     result = CliRunner().invoke(app, ["scan"])
     assert result.exit_code == 2 and "is invalid" in " ".join(result.output.split())
+
+
+def test_env_overrides_llm(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYMBIONT_LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("SYMBIONT_LLM_MODEL", "claude-sonnet-5-5")
+    cfg = config.load(tmp_path)
+    assert (cfg.llm.provider, cfg.llm.model) == ("anthropic", "claude-sonnet-5-5")
+
+
+def test_cli_propose_apply_and_summary(repo, monkeypatch):
+    monkeypatch.chdir(repo)
+    run = CliRunner().invoke
+    assert "No verified fixes" in run(app, ["summary"]).output
+    assert run(app, ["propose", "--no-llm", "--apply"]).exit_code == 0
+    assert "import os" not in (repo / "calc.py").read_text()
+    md = run(app, ["summary"]).output
+    assert "### F401" in md and "`calc.py`" in md and "- check 'tests': passes" in md

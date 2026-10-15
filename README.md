@@ -73,9 +73,40 @@ limits:
 Checks run inside the sandbox. Your repo's `.venv`, `venv` and `node_modules` are linked in, and
 `$SYMBIONT_ROOT` points at the real repo if a command needs it.
 
+**Memory:** a 7B model needs about 6 GB free; on an 8 GB machine it swaps and times out, so use
+ruff-only mode or a hosted model there.
+
 **Choosing a model:** small models (e.g. `phi3:mini`) mostly produce edits that fail
 verification, so they get rejected rather than proposed. A code model of 7B or more locally, or a
 hosted model, works far better. With `provider: none`, Symbiont still proposes every safe ruff fix.
+
+## Weekly fix PRs on GitHub
+
+Add this workflow to any repo. Each week Symbiont proposes fixes, applies each verified one on
+top of the last, and opens (or updates) a single pull request whose description lists the
+evidence for every fix.
+
+```yaml
+# .github/workflows/symbiont.yml
+on:
+  schedule: [{cron: "0 6 * * 1"}]
+  workflow_dispatch:
+permissions: {contents: write, pull-requests: write}
+jobs:
+  fixes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Kubermench/cognitive-symbiont@main
+        with:
+          setup-command: pip install -e ".[dev]"   # whatever makes your tests runnable
+          # llm-provider: anthropic                # optional: also fix what ruff can't
+          # llm-model: claude-sonnet-5-5
+          # api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+The repo must allow it: **Settings → Actions → General → "Allow GitHub Actions to create and
+approve pull requests"**. Without an LLM, only ruff's safe fixes are proposed.
 
 ## Development
 
