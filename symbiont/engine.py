@@ -177,16 +177,14 @@ class Engine:
                 sb.reset()
                 try:
                     self._make_change(sb.path, task, feedback, lint_before)
-                    evidence = self._verify(sb, task, lint_before, baseline)
+                    evidence, files, patch = self._verify(sb, task, lint_before, baseline)
                 except Rejected as exc:
                     reason = feedback = str(exc)
                     continue
                 except LLMError as exc:
                     self._llm_down = str(exc)
                     return Outcome(task, None, str(exc))
-                prop = self.store.add(
-                    task.title, task.kind, sb.changed_files(), sb.diff(), evidence
-                )
+                prop = self.store.add(task.title, task.kind, files, patch, evidence)
                 return Outcome(task, prop, "; ".join(evidence))
         return Outcome(task, None, reason)
 
@@ -246,7 +244,8 @@ class Engine:
     # -- verification -----------------------------------------------------------
     def _verify(
         self, sb: Sandbox, task: Task, lint_before, baseline: list[checks.Result]
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str], str]:
+        """Return evidence plus the change itself, captured before checks can add artifacts."""
         assert sb.path is not None
         changed = sb.changed_files()
         if not changed:
@@ -282,6 +281,7 @@ class Engine:
         else:
             evidence.append("lint: no new issues")
 
+        files, patch = changed, sb.diff()
         results = checks.run(sb.path, self.checks, self.cfg.check_timeout, repo=self.root)
         broken = checks.regressions(baseline, results)
         if broken:
@@ -293,4 +293,4 @@ class Engine:
             )
         if not results:
             evidence.append("no test checks configured or detected")
-        return evidence
+        return evidence, files, patch

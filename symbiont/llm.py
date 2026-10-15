@@ -50,7 +50,7 @@ class Ollama(_Base):
             {
                 "model": self.cfg.model,
                 "stream": False,
-                "options": {"temperature": 0},
+                "options": {"temperature": 0, "num_ctx": self.cfg.context},
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt},

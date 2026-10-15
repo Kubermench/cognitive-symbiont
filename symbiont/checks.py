@@ -50,7 +50,7 @@ def detect(root: Path, cfg: Config) -> list[Check]:
 
 def run(root: Path, checks: list[Check], timeout: int, repo: Path | None = None) -> list[Result]:
     """Run checks in `root` (normally a sandbox). $SYMBIONT_ROOT points at the real repo."""
-    env = {**os.environ, "SYMBIONT_ROOT": str(repo or root)}
+    env = {**os.environ, "SYMBIONT_ROOT": str(repo or root), "PYTHONDONTWRITEBYTECODE": "1"}
     results = []
     for check in checks:
         try:

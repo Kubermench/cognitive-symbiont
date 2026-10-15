@@ -68,7 +68,8 @@ def test_cli_scan_propose_apply(repo, monkeypatch):
 def test_cli_outside_git_repo(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(app, ["list"])
-    assert result.exit_code == 2 and "not inside a git repository" in result.output
+    assert result.exit_code == 2
+    assert "not inside a git repository" in " ".join(result.output.split())
 
 
 def test_invalid_config_is_a_clean_error(repo, monkeypatch):
@@ -77,4 +78,4 @@ def test_invalid_config_is_a_clean_error(repo, monkeypatch):
         config.load(repo)
     monkeypatch.chdir(repo)
     result = CliRunner().invoke(app, ["scan"])
-    assert result.exit_code == 2 and "is invalid" in result.output
+    assert result.exit_code == 2 and "is invalid" in " ".join(result.output.split())

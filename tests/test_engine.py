@@ -158,3 +158,17 @@ def test_checks_see_repo_virtualenv_and_root(repo):
     sh(repo, "git", "commit", "-qm", "env")
     eng = make_engine(repo)
     assert all(r.passed for r in eng.baseline())
+
+
+def test_check_artifacts_never_enter_the_patch(repo):
+    (repo / ".symbiont.yml").write_text(
+        "checks:\n  - name: noisy\n    run: echo junk > build-artifact.txt\n"
+    )
+    sh(repo, "git", "add", "-A")
+    sh(repo, "git", "commit", "-qm", "noisy check")
+    eng = make_engine(repo)
+    task = next(t for t in engine.plan(repo, eng.cfg) if t.code == "F401")
+    outcome = eng.attempt(task)
+    assert outcome.proposal, outcome.reason
+    assert outcome.proposal.files == ["calc.py"]
+    assert "build-artifact" not in Store(repo).patch(outcome.proposal.id)

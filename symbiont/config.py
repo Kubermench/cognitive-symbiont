@@ -22,6 +22,7 @@ llm:
   # base_url: https://api.openai.com/v1   # openai or any OpenAI-compatible server
   # api_key_env: OPENAI_API_KEY           # env var holding the key (openai/anthropic)
   timeout: 300
+  context: 8192          # ollama only: context window in tokens
 
 # Commands that must keep passing for a fix to be accepted.
 # Leave unset to autodetect (pytest when the repo has tests).
@@ -48,6 +49,7 @@ class LLMConfig:
     base_url: str = "https://api.openai.com/v1"
     api_key_env: str | None = None
     timeout: float = 300.0
+    context: int = 8192  # ollama context window (tokens); its default is too small for whole files
 
 
 @dataclass
@@ -95,6 +97,8 @@ def _load(root: Path) -> Config:
             setattr(cfg.llm, key, str(llm[key]))
     if llm.get("timeout") is not None:
         cfg.llm.timeout = float(llm["timeout"])
+    if llm.get("context") is not None:
+        cfg.llm.context = int(llm["context"])
 
     if raw.get("checks") is not None:
         cfg.checks = [
