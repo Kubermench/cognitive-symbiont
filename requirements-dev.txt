@@ -1,3 +1,0 @@
-# Development-only dependencies
--r requirements.txt
-openai>=1.46.0
